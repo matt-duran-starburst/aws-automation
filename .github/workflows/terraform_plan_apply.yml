@@ -59,7 +59,7 @@ jobs:
     - name: Terraform Init
       run: terraform init
 
-    - name: Download Terraform Plan File
+    - name: Download Terraform Plan File/Artifact
       uses: actions/download-artifact@v4
       with:
          name: terraform-plan
