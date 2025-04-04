@@ -30,9 +30,39 @@ jobs:
     - name: Terraform Init
       run: terraform init
 
+    - name: Generate Terraform Plan
+      run: terraform plan -out=tfplan
 
-      # On push to "main", build or change infrastructure according to Terraform configuration files
-      # Note: It is recommended to set up a required "strict" status check in your repository for "Terraform Cloud". See the documentation on "strict" required status checks for more information: https://help.github.com/en/github/administering-a-repository/types-of-required-status-checks
-    #- name: Terraform Apply
-     # if: github.ref == 'refs/heads/"main"' && github.event_name == 'push'
-     # run: terraform apply -auto-approve -input=false
+    - name: Save Terraform Plan File
+      uses: actions/upload-artifact@v4
+      with:
+        name: terraform-plan
+        path: tfplan
+
+  terraform_apply:
+    # in order to first do the plan and then the apply (order the operations)
+    needs: terraform_plan
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Login to Azure
+      uses:azure/login@v2
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+
+    - name: Terraform Init
+      run: terraform init
+
+    - name: Download Terraform Plan File
+      uses: actions/download-artifact@v4
+      with:
+         name: terraform-plan
+
+    - name: Terraform Apply
+      run: terraform apply -auto-approve tfplan
