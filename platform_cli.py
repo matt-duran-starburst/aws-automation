@@ -1203,5 +1203,275 @@ def update_kubeconfig(deployment_id):
         raise click.Abort()
 
 
+def create_postgres_rds(name, vpc_id, subnets, region, user, password, db_name=None, instance_type='db.t3.micro', allocated_storage=20, backup_retention=7, deployment_id=None):
+    """Create a PostgreSQL RDS database instance in the specified VPC"""
+    try:
+        click.echo(f"🔄 Creating PostgreSQL RDS instance: {name}...")
+        
+        # Create an RDS client
+        rds = boto3.client('rds', region_name=region)
+        
+        # Create a security group for the RDS instance
+        ec2 = boto3.client('ec2', region_name=region)
+        
+        # Create a security group for RDS
+        sg_name = f"{name}-rds-sg"
+        sg_desc = f"Security group for RDS database {name}"
+        
+        click.echo(f"📊 Creating security group: {sg_name}")
+        sg_response = ec2.create_security_group(
+            GroupName=sg_name,
+            Description=sg_desc,
+            VpcId=vpc_id
+        )
+        sg_id = sg_response['GroupId']
+        
+        # Tag the security group
+        ec2.create_tags(
+            Resources=[sg_id],
+            Tags=[
+                {'Key': 'Name', 'Value': sg_name},
+                {'Key': 'PlatformManaged', 'Value': 'true'},
+                {'Key': 'DeploymentId', 'Value': deployment_id or name}
+            ]
+        )
+        
+        # Allow PostgreSQL traffic from the VPC CIDR
+        vpc_response = ec2.describe_vpcs(VpcIds=[vpc_id])
+        vpc_cidr = vpc_response['Vpcs'][0]['CidrBlock']
+        
+        ec2.authorize_security_group_ingress(
+            GroupId=sg_id,
+            IpPermissions=[
+                {
+                    'IpProtocol': 'tcp',
+                    'FromPort': 5432,
+                    'ToPort': 5432,
+                    'IpRanges': [{'CidrIp': vpc_cidr}]
+                }
+            ]
+        )
+        
+        # Get subnet IDs
+        subnet_ids = [subnet['id'] for subnet in subnets]
+        
+        # Create subnet group for RDS
+        db_subnet_group_name = f"{name}-subnet-group"
+        click.echo(f"📊 Creating DB subnet group: {db_subnet_group_name}")
+        
+        rds.create_db_subnet_group(
+            DBSubnetGroupName=db_subnet_group_name,
+            DBSubnetGroupDescription=f"Subnet group for {name}",
+            SubnetIds=subnet_ids,
+            Tags=[
+                {'Key': 'Name', 'Value': db_subnet_group_name},
+                {'Key': 'PlatformManaged', 'Value': 'true'},
+                {'Key': 'DeploymentId', 'Value': deployment_id or name}
+            ]
+        )
+        
+        # Set default DB name if not specified
+        if not db_name:
+            db_name = "postgres"
+            
+        # Create the RDS instance
+        click.echo(f"🚀 Launching RDS instance: {name} ({instance_type}, {allocated_storage}GB)")
+        
+        response = rds.create_db_instance(
+            DBName=db_name,
+            DBInstanceIdentifier=name,
+            AllocatedStorage=allocated_storage,
+            DBInstanceClass=instance_type,
+            Engine='postgres',
+            MasterUsername=user,
+            MasterUserPassword=password,
+            VpcSecurityGroupIds=[sg_id],
+            DBSubnetGroupName=db_subnet_group_name,
+            BackupRetentionPeriod=backup_retention,
+            MultiAZ=False,
+            AutoMinorVersionUpgrade=True,
+            PubliclyAccessible=False,
+            Tags=[
+                {'Key': 'Name', 'Value': name},
+                {'Key': 'PlatformManaged', 'Value': 'true'},
+                {'Key': 'DeploymentId', 'Value': deployment_id or name}
+            ]
+        )
+        
+        click.echo(f"✅ RDS instance creation initiated. This may take 5-10 minutes to complete.")
+        click.echo(f"📊 Database endpoint will be available when the instance is ready.")
+        
+        return {
+            "db_instance_id": name,
+            "security_group_id": sg_id,
+            "subnet_group": db_subnet_group_name,
+            "status": "creating",
+            "db_name": db_name,
+            "username": user,
+            "engine": "postgres",
+            "instance_type": instance_type,
+            "allocated_storage": allocated_storage,
+            "region": region
+        }
+        
+    except Exception as e:
+        click.echo(f"❌ Failed to create RDS instance: {str(e)}")
+        raise
+
+
+def get_rds_instance_status(instance_id, region):
+    """Get the status and endpoint information for an RDS instance"""
+    try:
+        rds = boto3.client('rds', region_name=region)
+        response = rds.describe_db_instances(DBInstanceIdentifier=instance_id)
+        
+        if not response['DBInstances']:
+            return None
+        
+        instance = response['DBInstances'][0]
+        return {
+            "status": instance['DBInstanceStatus'],
+            "endpoint": instance.get('Endpoint', {}).get('Address'),
+            "port": instance.get('Endpoint', {}).get('Port', 5432),
+            "engine": instance['Engine'],
+            "engine_version": instance['EngineVersion'],
+            "storage": instance['AllocatedStorage']
+        }
+    except Exception as e:
+        click.echo(f"❌ Error getting RDS status: {str(e)}")
+        return None
+
+
+@create.command("postgres")
+@click.option("--name", required=True, help="Database instance name")
+@click.option("--deployment-id", required=True, help="EKS deployment ID to attach to")
+@click.option("--username", required=True, help="Master username")
+@click.option("--password", required=True, help="Master password")
+@click.option("--db-name", default="postgres", help="Database name")
+@click.option("--instance-type", default="db.t3.micro", help="RDS instance type")
+@click.option("--storage", default=20, type=int, help="Allocated storage in GB")
+@click.option("--backup-retention", default=7, type=int, help="Backup retention in days")
+def create_postgres_db(name, deployment_id, username, password, db_name, instance_type, storage, backup_retention):
+    """Create a PostgreSQL database for an EKS deployment"""
+    
+    # Check if setup is complete
+    config = check_setup_required()
+    
+    # Validate AWS credentials
+    validate_aws_credentials()
+    
+    # Check if the deployment exists
+    deployment_dir = DEPLOYMENTS_DIR / deployment_id
+    metadata_file = deployment_dir / "metadata.json"
+    
+    if not metadata_file.exists():
+        click.echo(f"❌ Deployment not found: {deployment_id}")
+        raise click.Abort()
+    
+    # Load deployment metadata
+    with open(metadata_file, 'r') as f:
+        metadata = json.load(f)
+    
+    # Ensure this is an EKS deployment
+    if metadata["resource_type"] != "eks-cluster":
+        click.echo("❌ This command only supports EKS cluster deployments")
+        raise click.Abort()
+    
+    region = metadata["region"]
+    
+    # Get deployment VPC and subnet information
+    click.echo(f"🔍 Getting VPC information for deployment: {deployment_id}")
+    
+    try:
+        # Use eksctl to get cluster information
+        cmd = ["eksctl", "get", "cluster", "-n", deployment_id, "-r", region, "-o", "json"]
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        cluster_info = json.loads(result.stdout)
+        
+        # Extract VPC ID
+        if not cluster_info or len(cluster_info) == 0:
+            click.echo("❌ Could not get cluster information")
+            raise click.Abort()
+        
+        vpc_id = cluster_info[0]["VPC"]["ID"]
+        click.echo(f"📋 Found VPC: {vpc_id}")
+        
+        # Get private subnets
+        subnets = get_vpc_subnets(region)
+        private_subnets = [s for s in subnets if s['type'] == 'private' and s['vpc_id'] == vpc_id]
+        
+        if not private_subnets or len(private_subnets) < 2:
+            click.echo("❌ Need at least 2 private subnets for RDS")
+            raise click.Abort()
+        
+        # Show selected subnets
+        click.echo("📋 Selected subnets for RDS:")
+        for subnet in private_subnets[:2]:
+            click.echo(f"   - {subnet['name']} ({subnet['id']}) in {subnet['az']}")
+        
+        # Create the RDS instance
+        db_name_sanitized = db_name.replace("-", "_")
+        db_instance_name = f"{deployment_id}-{name}"
+        
+        # Check if database instance name exceeds 63 characters (RDS limit)
+        if len(db_instance_name) > 63:
+            db_instance_name = f"{deployment_id[:30]}-{name[:28]}"
+            click.echo(f"⚠️  Database name truncated to: {db_instance_name}")
+        
+        # Confirm creation
+        click.echo(f"\n🚀 Creating PostgreSQL database: {db_instance_name}")
+        click.echo(f"   VPC: {vpc_id}")
+        click.echo(f"   Type: {instance_type}")
+        click.echo(f"   Storage: {storage} GB")
+        click.echo(f"   Username: {username}")
+        click.echo(f"   Database: {db_name_sanitized}")
+        
+        if not click.confirm("\nProceed with database creation?"):
+            click.echo("❌ Database creation cancelled")
+            return
+        
+        # Create the RDS instance
+        db_info = create_postgres_rds(
+            name=db_instance_name,
+            vpc_id=vpc_id,
+            subnets=private_subnets[:2],  # Use first 2 private subnets
+            region=region,
+            user=username,
+            password=password,
+            db_name=db_name_sanitized,
+            instance_type=instance_type,
+            allocated_storage=storage,
+            backup_retention=backup_retention,
+            deployment_id=deployment_id
+        )
+        
+        # Save RDS metadata
+        rds_metadata_path = deployment_dir / "rds_metadata.json"
+        with open(rds_metadata_path, 'w') as f:
+            # Don't store the password in the metadata
+            db_info_safe = dict(db_info)
+            db_info_safe["password"] = "******"  # Don't store actual password
+            json.dump(db_info_safe, f, indent=2)
+        
+        # Update deployment metadata
+        metadata["has_rds"] = True
+        metadata["rds_instance_id"] = db_instance_name
+        
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        click.echo(f"\n✅ PostgreSQL database creation initiated: {db_instance_name}")
+        click.echo("📊 Database creation will take 5-10 minutes.")
+        click.echo("💡 You can check the status with: aws rds describe-db-instances " +
+                 f"--db-instance-identifier {db_instance_name} --region {region}")
+        
+    except subprocess.CalledProcessError as e:
+        click.echo(f"❌ Error getting cluster information: {e.stderr}")
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"❌ Error creating database: {str(e)}")
+        raise click.Abort()
+
+
 if __name__ == "__main__":
     cli()
