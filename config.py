@@ -12,8 +12,7 @@ load_dotenv()
 
 # AWS authentication credentials - from environment variables
 # Public Cloud
-AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')
-AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
+AWS_PROFILE = os.environ.get('AWS_PROFILE', '')
 
 # List of AWS regions to process
 REGIONS = [
@@ -98,7 +97,7 @@ def validate_config():
     warnings = []
 
     # Check required credentials
-    if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+    if not AWS_PROFILE:
         errors.append("No AWS credentials found. Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.")
 
     # Check config exists
