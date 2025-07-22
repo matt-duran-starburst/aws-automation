@@ -27,23 +27,7 @@ class PlatformConfig:
         if self.config_path.exists():
             with open(self.config_path, 'r') as f:
                 return json.load(f)
-        return {
-            "default_region": "us-east-1",
-            "default_expiration": "7d",
-            "aws_account_id": None,
-            "default_key_name": "en-field-key",
-            "user_profile": {
-                "name": None,
-                "email": None,
-                "org": None,
-                "team": None
-            },
-            "default_tags": {
-                "cloud": "aws",
-                "environment": "demo"
-            },
-            "setup_complete": False
-        }
+        return DEFAULT_CONFIG
 
     def save_config(self):
         with open(self.config_path, 'w') as f:
