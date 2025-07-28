@@ -1588,7 +1588,7 @@ def locate_s3_bucket(name: str, region: str) -> str | None:
 
 def create_s3_bucket(
     name: str,
-    region: str, # MODIFIED: Accept 'region' as a direct argument
+    region: str, 
     config_instance: PlatformConfig, 
     owner: str,
     preset: str,
@@ -1610,24 +1610,23 @@ def create_s3_bucket(
     s3 = boto3.client('s3', region_name=region)
 
     try:
-        # --- MODIFIED: Create bucket with highly defensive retry for us-east-1 quirks ---
+
         if region == 'us-east-1':
             try:
-                # First attempt for us-east-1: No CreateBucketConfiguration at all (standard for us-east-1)
+               
                 s3.create_bucket(Bucket=name) 
                 click.echo(f"Debug: Called s3.create_bucket(Bucket='{name}') for us-east-1 (no CreateBucketConfiguration).")
             except ClientError as ce:
                 error_code = ce.response.get("Error", {}).get("Code")
                 error_message = ce.response.get("Error", {}).get("Message")
-                # Specific retry for known us-east-1 quirks (IllegalLocationConstraintException/MalformedXML)
+                
                 if error_code in ['IllegalLocationConstraintException', 'MalformedXML']:
                     click.echo(click.style(f"Debug: Retrying us-east-1 creation due to '{error_code}' (Message: '{error_message}') on first attempt. Trying with explicit empty configuration...", fg='yellow'), err=True)
                     try:
-                        # Second attempt for us-east-1: Attempt with empty config dict
-                        # Some versions/environments might prefer this explicit empty parameter.
+
                         s3.create_bucket(
                             Bucket=name,
-                            CreateBucketConfiguration={} # Explicitly empty config
+                            CreateBucketConfiguration={} 
                         )
                         click.echo(f"Debug: Called s3.create_bucket(Bucket='{name}', CreateBucketConfiguration={{}}) for us-east-1 (retry).")
                     except ClientError as retry_ce:
@@ -1637,11 +1636,11 @@ def create_s3_bucket(
                         click.echo(click.style(f"Error: Unexpected error on us-east-1 retry: {retry_unhandled_ce}", fg='red'), err=True)
                         return False
                 else:
-                    # If it's a different ClientError for us-east-1, re-raise it
+
                     click.echo(click.style(f"Error: Failed to create bucket '{name}' in us-east-1 (non-quirk error): {ce}", fg='red'), err=True)
                     return False
         else:
-            # For other regions, provide LocationConstraint.
+
             create_bucket_config = {'LocationConstraint': region}
             s3.create_bucket(
                 Bucket=name,
