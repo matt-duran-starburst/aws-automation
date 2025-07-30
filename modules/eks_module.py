@@ -282,6 +282,200 @@ def get_cluster_vpc_info(deployment_id, region):
         raise Exception(f"Error parsing cluster information: {str(e)}")
 
 
+def smart_subnet_selection(subnets, min_azs=2):
+    """
+    Intelligently select subnets across multiple availability zones
+    Prioritizes private subnets and ensures multi-AZ distribution
+    """
+    # Filter private subnets
+    private_subnets = [s for s in subnets if s['type'] == 'private']
+
+    if not private_subnets:
+        raise ValueError("No private subnets available")
+
+    # Group subnets by VPC
+    vpcs = {}
+    for subnet in private_subnets:
+        vpc_id = subnet['vpc_id']
+        if vpc_id not in vpcs:
+            vpcs[vpc_id] = []
+        vpcs[vpc_id].append(subnet)
+
+    # Find the VPC with the most subnets
+    best_vpc = max(vpcs.keys(), key=lambda vpc: len(vpcs[vpc]))
+    vpc_subnets = vpcs[best_vpc]
+
+    # Group by availability zone
+    az_subnets = {}
+    for subnet in vpc_subnets:
+        az = subnet['az']
+        if az not in az_subnets:
+            az_subnets[az] = []
+        az_subnets[az].append(subnet)
+
+    # Validate we have enough AZs
+    if len(az_subnets) < min_azs:
+        raise ValueError(f"Need at least {min_azs} availability zones, found {len(az_subnets)}")
+
+    # Select one subnet from each AZ, prioritizing by subnet size or other criteria
+    selected_subnets = []
+    for az in sorted(az_subnets.keys())[:3]:  # Max 3 AZs for EKS
+        # Select the first subnet from each AZ (could be enhanced with better selection logic)
+        selected_subnets.append(az_subnets[az][0])
+
+    return selected_subnets
+
+
+def validate_cluster_requirements(instance_types, region, capacity_type="SPOT"):
+    """
+    Validate cluster requirements including instance type availability
+    Returns (errors, warnings) tuple
+    """
+    errors = []
+    warnings = []
+
+    try:
+        ec2 = boto3.client('ec2', region_name=region)
+
+        # Check instance type availability
+        for instance_type in instance_types:
+            try:
+                response = ec2.describe_instance_type_offerings(
+                    LocationType='region',
+                    Filters=[
+                        {'Name': 'instance-type', 'Values': [instance_type]},
+                        {'Name': 'location', 'Values': [region]}
+                    ]
+                )
+
+                if not response['InstanceTypeOfferings']:
+                    warnings.append(f"Instance type {instance_type} may not be available in {region}")
+
+            except Exception as e:
+                warnings.append(f"Could not verify availability of {instance_type}: {str(e)}")
+
+        # Check for Spot instance availability if using Spot
+        if capacity_type == "SPOT":
+            # Just a warning since Spot availability is dynamic
+            warnings.append("Using Spot instances - availability and pricing may vary")
+
+    except Exception as e:
+        errors.append(f"Failed to validate instance requirements: {str(e)}")
+
+    return errors, warnings
+
+
+def run_eksctl_command_with_monitoring(command, deployment_dir, config_file, deployment_id, region):
+    """
+    Enhanced eksctl command execution with real-time monitoring and extended timeout
+    """
+    import time
+    import threading
+
+    original_dir = os.getcwd()
+
+    try:
+        os.chdir(deployment_dir)
+
+        if command == "create":
+            cmd = ["eksctl", "create", "cluster", "-f", config_file]
+        elif command == "delete":
+            cmd = ["eksctl", "delete", "cluster", "-f", config_file]
+        else:
+            raise ValueError(f"Unknown eksctl command: {command}")
+
+        click.echo(f"🔄 Running: {' '.join(cmd)}")
+        click.echo("⏰ This process typically takes 15-25 minutes...")
+
+        # Start the process
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+
+        # Real-time output monitoring
+        start_time = time.time()
+        last_output_time = start_time
+        timeout = 40 * 60  # 40 minutes timeout
+
+        def monitor_cloudformation():
+            """Monitor CloudFormation stacks in parallel"""
+            cf = boto3.client('cloudformation', region_name=region)
+            while process.poll() is None:
+                try:
+                    stacks = cf.list_stacks(
+                        StackStatusFilter=['CREATE_IN_PROGRESS', 'DELETE_IN_PROGRESS']
+                    )['StackSummaries']
+
+                    for stack in stacks:
+                        if deployment_id in stack['StackName']:
+                            click.echo(f"📊 Stack {stack['StackName']}: {stack['StackStatus']}")
+
+                    time.sleep(30)  # Check every 30 seconds
+                except:
+                    pass
+
+        # Start CloudFormation monitoring in background
+        monitor_thread = threading.Thread(target=monitor_cloudformation, daemon=True)
+        monitor_thread.start()
+
+        # Read output line by line
+        while True:
+            output = process.stdout.readline()
+            if output:
+                click.echo(output.strip())
+                last_output_time = time.time()
+
+            # Check if process has finished
+            if process.poll() is not None:
+                break
+
+            # Check for timeout
+            if time.time() - start_time > timeout:
+                click.echo("⏰ Process timeout reached (40 minutes)")
+                process.terminate()
+
+                # Check if cluster is actually being created despite timeout
+                try:
+                    eks = boto3.client('eks', region_name=region)
+                    response = eks.describe_cluster(name=deployment_id)
+                    if response['cluster']['status'] in ['CREATING', 'ACTIVE']:
+                        click.echo("✅ Cluster creation is progressing in AWS despite timeout")
+                        return "TIMEOUT_BUT_PROGRESSING"
+                except:
+                    pass
+
+                raise Exception("eksctl command timed out after 40 minutes")
+
+            # Warn if no output for a while
+            if time.time() - last_output_time > 300:  # 5 minutes
+                click.echo("⏳ Still waiting for eksctl... (this is normal)")
+                last_output_time = time.time()
+
+        # Get any remaining output
+        remaining_output, errors = process.communicate()
+        if remaining_output:
+            click.echo(remaining_output)
+        if errors:
+            click.echo(errors)
+
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(process.returncode, cmd, errors)
+
+        return "SUCCESS"
+
+    except subprocess.CalledProcessError as e:
+        click.echo(f"❌ eksctl {command} failed:")
+        click.echo(e.stderr if e.stderr else "No error output available")
+        raise
+    finally:
+        os.chdir(original_dir)
+
+
 def update_kubeconfig(deployment_id, region):
     """Update kubeconfig for a deployment"""
     try:
