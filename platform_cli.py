@@ -24,7 +24,8 @@ from modules.utils_module import (
 )
 from modules.eks_module import (
     scale_eks_nodegroups, run_eksctl_command, generate_eksctl_config,
-    get_cluster_vpc_info, update_kubeconfig
+    get_cluster_vpc_info, update_kubeconfig, smart_subnet_selection,
+    validate_cluster_requirements, run_eksctl_command_with_monitoring
 )
 from modules.rds_module import (
     create_rds_instance, get_rds_instance_status, delete_rds_instance,
@@ -131,7 +132,9 @@ def setup():
 @click.option("--eksctl-config", help="Path to existing eksctl config file")
 @click.option("--auto-select-subnets", is_flag=True, help="Automatically select first available private subnets")
 @click.option("--force-long-name", is_flag=True, help="Skip cluster name length validation (advanced)")
-def create_eks_cluster(name, owner, purpose, expires_in, region, preset, eksctl_config, auto_select_subnets, force_long_name):
+@click.option("--skip-validation", is_flag=True, help="Skip pre-flight validation checks")
+def create_eks_cluster(name, owner, purpose, expires_in, region, preset, eksctl_config,
+                      auto_select_subnets, force_long_name, skip_validation):
     """Create a new EKS cluster using eksctl"""
 
     # Check if setup is complete
@@ -195,6 +198,214 @@ def create_eks_cluster(name, owner, purpose, expires_in, region, preset, eksctl_
 
     # Create deployment directory
     deployment_dir.mkdir(exist_ok=True)
+
+    # Handle eksctl configuration
+    if eksctl_config:
+        # Use provided eksctl config
+        click.echo(f"📋 Using provided eksctl config: {eksctl_config}")
+        import shutil
+        shutil.copy(eksctl_config, deployment_dir / "cluster.yaml")
+        eksctl_config_path = "cluster.yaml"
+    else:
+        # Generate eksctl config
+        click.echo("🔍 Fetching available subnets...")
+        subnets = get_vpc_subnets(region)
+
+        if not subnets:
+            click.echo("❌ No subnets found in region")
+            raise click.Abort()
+
+        # Filter private subnets
+        private_subnets = [s for s in subnets if s['type'] == 'private']
+
+        if not private_subnets:
+            click.echo("❌ No private subnets found")
+            raise click.Abort()
+
+        if auto_select_subnets:
+            # Use smart auto-selection with multi-AZ support
+            try:
+                selected_subnets = smart_subnet_selection(subnets, min_azs=2)
+                click.echo(f"✅ Auto-selected {len(selected_subnets)} subnets across {len(set(s['az'] for s in selected_subnets))} AZs")
+                for subnet in selected_subnets:
+                    click.echo(f"   - {subnet['name']} ({subnet['id']}) in {subnet['az']}")
+            except Exception as e:
+                click.echo(f"❌ Auto-selection failed: {e}")
+                raise click.Abort()
+
+        else:
+            # Interactive subnet selection - group by VPC for better UX
+            vpcs = {}
+            for subnet in private_subnets:
+                vpc_id = subnet['vpc_id']
+                if vpc_id not in vpcs:
+                    vpcs[vpc_id] = []
+                vpcs[vpc_id].append(subnet)
+
+            # Show subnets grouped by VPC
+            click.echo("\n📋 Available private subnets grouped by VPC:")
+            subnet_choices = []
+            choice_index = 1
+
+            for vpc_id, vpc_subnets in vpcs.items():
+                click.echo(f"\n  VPC: {vpc_id}")
+                # Show AZ distribution for this VPC
+                vpc_azs = set(s['az'] for s in vpc_subnets)
+                click.echo(f"      AZs available: {len(vpc_azs)} ({', '.join(sorted(vpc_azs))})")
+
+                for subnet in vpc_subnets:
+                    click.echo(f"    {choice_index}. {subnet['name']} ({subnet['id']}) - {subnet['az']} - {subnet['cidr']}")
+                    subnet_choices.append(subnet)
+                    choice_index += 1
+
+            click.echo("\n⚠️  Important: All selected subnets must be from the same VPC!")
+            click.echo("💡 Tip: Choose subnets from different AZs for better availability")
+
+            selected_indices = click.prompt(
+                "Select subnets (comma-separated numbers, e.g., 1,2,3)",
+                type=str
+            )
+
+            try:
+                indices = [int(x.strip()) - 1 for x in selected_indices.split(',')]
+                selected_subnets = [subnet_choices[i] for i in indices]
+
+                # Validate all subnets are from the same VPC
+                vpc_ids = set(subnet['vpc_id'] for subnet in selected_subnets)
+                if len(vpc_ids) > 1:
+                    click.echo(f"❌ Selected subnets are from different VPCs: {vpc_ids}")
+                    click.echo("Please select subnets from the same VPC only.")
+                    raise click.Abort()
+
+                # Validate we have subnets in different AZs
+                azs = set(subnet['az'] for subnet in selected_subnets)
+                if len(azs) < 2:
+                    click.echo("⚠️ Warning: Selected subnets are all in the same AZ")
+                    click.echo("This reduces availability and fault tolerance.")
+                    if not confirm_action("Continue anyway?"):
+                        raise click.Abort()
+
+            except (ValueError, IndexError):
+                click.echo("❌ Invalid subnet selection")
+                raise click.Abort()
+
+        click.echo(f"✅ Selected {len(selected_subnets)} subnets")
+
+        # Run pre-flight validation unless skipped
+        if not skip_validation:
+            # Get instance types for validation based on preset
+            preset_instances = {
+                "demo": ["t3.medium", "t3.large"],
+                "development": ["m5.large", "m5.xlarge", "m6i.large"],
+                "performance": ["m5.xlarge", "m6i.xlarge", "m5.2xlarge"]
+            }
+
+            test_instances = preset_instances.get(preset, ["m5.large", "m5.xlarge"])
+            errors, warnings = validate_cluster_requirements(test_instances, region, "SPOT")
+
+            if errors:
+                click.echo("❌ Pre-flight validation failed:")
+                for error in errors:
+                    click.echo(f"   {error}")
+                click.echo("💡 Try a different region, instance types, or use --skip-validation")
+                raise click.Abort()
+
+            if warnings:
+                click.echo("⚠️ Pre-flight validation warnings:")
+                for warning in warnings:
+                    click.echo(f"   {warning}")
+                if not confirm_action("Continue with warnings?"):
+                    raise click.Abort()
+
+            click.echo("✅ Pre-flight validation passed")
+
+        # Generate eksctl config
+        eksctl_config_data = generate_eksctl_config(
+            deployment_id, owner, region, selected_subnets, preset, expires_at, config
+        )
+
+        # Save eksctl config
+        eksctl_config_path = deployment_dir / "cluster.yaml"
+        with open(eksctl_config_path, 'w') as f:
+            yaml.dump(eksctl_config_data, f, default_flow_style=False)
+
+        eksctl_config_path = "cluster.yaml"
+
+        click.echo(f"📝 Generated eksctl config: {deployment_dir / 'cluster.yaml'}")
+
+    # Create metadata
+    metadata = create_deployment_metadata(
+        deployment_id, name, owner, purpose, expires_at, "eks-cluster", region
+    )
+    metadata["eksctl_config"] = eksctl_config_path
+    metadata["preset"] = preset
+    metadata["is_running"] = False  # Track if cluster is running or stopped
+
+    # Save metadata
+    save_deployment_metadata(deployment_id, metadata)
+
+    # Show config preview
+    click.echo("\n📋 Cluster configuration preview:")
+    with open(deployment_dir / eksctl_config_path, 'r') as f:
+        config_preview = f.read()
+        # Show first 20 lines
+        lines = config_preview.split('\n')[:20]
+        click.echo('\n'.join(lines))
+        if len(config_preview.split('\n')) > 20:
+            click.echo("...")
+
+    if confirm_action("\nProceed with cluster creation?"):
+        click.echo("🚀 Creating EKS cluster (this may take 15-25 minutes)...")
+        click.echo("💡 Tip: This process is now more robust with better error handling")
+
+        try:
+            # Use the improved eksctl command with monitoring
+            output = run_eksctl_command_with_monitoring(
+                "create", deployment_dir, eksctl_config_path, deployment_id, region
+            )
+
+            if output == "TIMEOUT_BUT_PROGRESSING":
+                # Handle timeout but progressing case
+                metadata["status"] = "creating"
+                metadata["is_running"] = False
+                metadata["created_date"] = datetime.now().isoformat()
+                metadata["notes"] = "Creation timed out but cluster may still be progressing"
+
+                save_deployment_metadata(deployment_id, metadata)
+
+                click.echo("⏰ Cluster creation timed out but is likely still progressing")
+                click.echo(f"🔍 Check status with: platform status {deployment_id}")
+                click.echo(f"📊 Monitor in AWS console: https://console.aws.amazon.com/eks/home?region={region}#/clusters/{deployment_id}")
+                return
+
+            click.echo(output)
+
+            # Update metadata
+            metadata["status"] = "running"
+            metadata["is_running"] = True
+            metadata["created_date"] = datetime.now().isoformat()
+
+            save_deployment_metadata(deployment_id, metadata)
+
+            click.echo("✅ EKS cluster created successfully!")
+            click.echo(f"📁 Deployment directory: {deployment_dir}")
+            click.echo(f"🎯 Update kubeconfig: aws eks update-kubeconfig --region {region} --name {deployment_id}")
+            click.echo(f"🔍 View in K9s: k9s --context {deployment_id}")
+            click.echo()
+            click.echo("💡 Tip: Use 'platform stop {deployment_id}' to scale down when not in use")
+
+        except Exception as e:
+            # Update metadata with error
+            metadata["status"] = "failed"
+            metadata["error"] = str(e)
+
+            save_deployment_metadata(deployment_id, metadata)
+
+            click.echo("❌ Cluster creation failed")
+            click.echo("💡 Check AWS CloudFormation console for detailed error information")
+            raise
+    else:
+        click.echo("❌ Cluster creation cancelled")
 
     # Handle eksctl configuration
     if eksctl_config:
@@ -1197,13 +1408,8 @@ def s3():
 def list_s3_buckets(region):
     """List platform-managed S3 buckets"""
 
-    config = check_setup_required()
+    check_setup_required()
     validate_aws_credentials()
-
-    # Use default region from config if none specified
-    if not region:
-        region = config.config.get("default_region")
-        click.echo(f"📍 Using default region: {region}")
 
     buckets = list_platform_buckets(region)
 
