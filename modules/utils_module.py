@@ -350,8 +350,7 @@ def validate_cluster_name(name, owner):
 
     # Check for invalid characters
     import re
-    if not re.match(r'^[a-zA-Z0-9-]+
-, name):
+    if not re.match(r'^[a-zA-Z0-9-]+', name):
         errors.append("Cluster name can only contain letters, numbers, and hyphens")
 
     if name.startswith('-') or name.endswith('-'):
