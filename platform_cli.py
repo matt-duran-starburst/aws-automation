@@ -1197,8 +1197,13 @@ def s3():
 def list_s3_buckets(region):
     """List platform-managed S3 buckets"""
 
-    check_setup_required()
+    config = check_setup_required()
     validate_aws_credentials()
+
+    # Use default region from config if none specified
+    if not region:
+        region = config.config.get("default_region")
+        click.echo(f"📍 Using default region: {region}")
 
     buckets = list_platform_buckets(region)
 
