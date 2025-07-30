@@ -226,12 +226,12 @@ def validate_config():
     if not CONFIG_FILE.exists():
         errors.append(f"Configuration file not found at {CONFIG_FILE}. Run 'platform setup' first.")
 
-    # Check notification settings
-    if SLACK_WEBHOOK_URL and not SLACK_WEBHOOK_URL.startswith('https://hooks.slack.com/'):
-        warnings.append("SLACK_WEBHOOK_URL doesn't appear to be a valid Slack webhook URL")
+    # # Check notification settings
+    # if SLACK_WEBHOOK_URL and not SLACK_WEBHOOK_URL.startswith('https://hooks.slack.com/'):
+    #     warnings.append("SLACK_WEBHOOK_URL doesn't appear to be a valid Slack webhook URL")
 
-    if NOTIFICATION_EMAIL_TO and not SMTP_SERVER:
-        warnings.append("Email notifications configured but no SMTP_SERVER specified")
+    # if NOTIFICATION_EMAIL_TO and not SMTP_SERVER:
+    #     warnings.append("Email notifications configured but no SMTP_SERVER specified")
 
     # Output any errors or warnings
     if errors:
