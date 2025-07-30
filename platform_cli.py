@@ -19,7 +19,8 @@ from modules.utils_module import (
     validate_aws_credentials, check_setup_required, get_vpc_subnets,
     parse_expiration, generate_deployment_id, create_deployment_metadata,
     load_deployment_metadata, save_deployment_metadata, list_deployments,
-    print_deployments_table, confirm_action, sanitize_name
+    print_deployments_table, confirm_action, sanitize_name,
+    validate_cluster_name, suggest_shorter_name, print_cluster_name_guidance
 )
 from modules.eks_module import (
     scale_eks_nodegroups, run_eksctl_command, generate_eksctl_config,
@@ -129,7 +130,8 @@ def setup():
               help="Cluster preset configuration")
 @click.option("--eksctl-config", help="Path to existing eksctl config file")
 @click.option("--auto-select-subnets", is_flag=True, help="Automatically select first available private subnets")
-def create_eks_cluster(name, owner, purpose, expires_in, region, preset, eksctl_config, auto_select_subnets):
+@click.option("--force-long-name", is_flag=True, help="Skip cluster name length validation (advanced)")
+def create_eks_cluster(name, owner, purpose, expires_in, region, preset, eksctl_config, auto_select_subnets, force_long_name):
     """Create a new EKS cluster using eksctl"""
 
     # Check if setup is complete
@@ -144,6 +146,31 @@ def create_eks_cluster(name, owner, purpose, expires_in, region, preset, eksctl_
         if not owner:
             click.echo("❌ No owner email specified and none configured. Run 'platform setup' or provide --owner")
             raise click.Abort()
+
+    # Validate cluster name unless force flag is used
+    if not force_long_name:
+        errors, warnings, test_deployment_id = validate_cluster_name(name, owner)
+
+        if errors:
+            click.echo("❌ Cluster name validation failed:")
+            for error in errors:
+                click.echo(f"   {error}")
+
+            # Suggest a shorter name
+            suggested = suggest_shorter_name(name)
+            if suggested != name:
+                click.echo(f"\n💡 Suggested shorter name: '{suggested}'")
+                click.echo(f"   Use: --name {suggested}")
+
+            print_cluster_name_guidance()
+            click.echo("Or use --force-long-name to skip validation (may cause deployment failures)")
+            raise click.Abort()
+
+        if warnings:
+            click.echo("⚠️  Cluster name warnings:")
+            for warning in warnings:
+                click.echo(f"   {warning}")
+            click.echo()
 
     # Parse expiration
     expires_at = parse_expiration(expires_in)
@@ -161,6 +188,10 @@ def create_eks_cluster(name, owner, purpose, expires_in, region, preset, eksctl_
     click.echo(f"🌍 Region: {region}")
     click.echo(f"⚙️  Preset: {preset}")
     click.echo(f"👤 Owner: {owner}")
+
+    # Show deployment ID length info
+    if len(deployment_id) > 30:
+        click.echo(f"⚠️  Long cluster name ({len(deployment_id)} chars) - some features disabled")
 
     # Create deployment directory
     deployment_dir.mkdir(exist_ok=True)
@@ -746,6 +777,212 @@ def extend_deployment(deployment_id, expires_in):
 
 
 @cli.command("config")
+@click.option("--set-region", help="Set default AWS region")
+@click.option("--set-expiration", help="Set default expiration time")
+@click.option("--set-key-name", help="Set default SSH key name")
+@click.option("--set-name", help="Set your name")
+@click.option("--set-email", help="Set your email")
+@click.option("--set-org", help="Set your organization")
+@click.option("--set-team", help="Set your team")
+@click.option("--set-environment", help="Set default environment")
+@click.option("--reset", is_flag=True, help="Reset configuration and run setup again")
+def configure(set_region, set_expiration, set_key_name, set_name, set_email,
+              set_org, set_team, set_environment, reset):
+    """Configure platform settings"""
+
+    config = PlatformConfig()
+
+    if reset:
+        if confirm_action("Are you sure you want to reset all configuration?"):
+            config.config = {
+                "default_region": "us-east-1",
+                "default_expiration": "7d",
+                "aws_account_id": config.config.get("aws_account_id"),  # Keep AWS account ID
+                "default_key_name": "en-field-key",
+                "user_profile": {
+                    "name": None,
+                    "email": None,
+                    "org": None,
+                    "team": None
+                },
+                "default_tags": {
+                    "cloud": "aws",
+                    "environment": "demo"
+                },
+                "setup_complete": False
+            }
+            config.save_config()
+            click.echo("✅ Configuration reset. Run 'platform setup' to reconfigure.")
+        return
+
+    # Update individual settings
+    if set_region:
+        config.config["default_region"] = set_region
+        click.echo(f"✅ Default region set to: {set_region}")
+
+    if set_expiration:
+        # Validate expiration format
+        try:
+            parse_expiration(set_expiration)
+            config.config["default_expiration"] = set_expiration
+            click.echo(f"✅ Default expiration set to: {set_expiration}")
+        except click.BadParameter as e:
+            click.echo(f"❌ {e}")
+            raise click.Abort()
+
+    if set_key_name:
+        config.config["default_key_name"] = set_key_name
+        click.echo(f"✅ Default SSH key name set to: {set_key_name}")
+
+    if set_name:
+        config.config.setdefault("user_profile", {})["name"] = set_name
+        click.echo(f"✅ Name set to: {set_name}")
+
+    if set_email:
+        config.config.setdefault("user_profile", {})["email"] = set_email
+        click.echo(f"✅ Email set to: {set_email}")
+
+    if set_org:
+        config.config.setdefault("user_profile", {})["org"] = set_org
+        config.config.setdefault("default_tags", {})["org"] = set_org
+        click.echo(f"✅ Organization set to: {set_org}")
+
+    if set_team:
+        config.config.setdefault("user_profile", {})["team"] = set_team
+        config.config.setdefault("default_tags", {})["team"] = set_team
+        click.echo(f"✅ Team set to: {set_team}")
+
+    if set_environment:
+        config.config.setdefault("default_tags", {})["environment"] = set_environment
+        click.echo(f"✅ Environment set to: {set_environment}")
+
+    # Save changes
+    if any([set_region, set_expiration, set_key_name, set_name, set_email,
+            set_org, set_team, set_environment]):
+        config.save_config()
+    else:
+        # Show current config
+        click.echo("📋 Current Configuration:")
+        click.echo()
+
+        # Setup status
+        setup_complete = config.config.get("setup_complete", False)
+        click.echo(f"Setup Complete: {'✅ Yes' if setup_complete else '❌ No (run platform setup)'}")
+        click.echo()
+
+        # User Profile
+        user_profile = config.config.get("user_profile", {})
+        click.echo("👤 User Profile:")
+        click.echo(f"   Name: {user_profile.get('name', 'Not set')}")
+        click.echo(f"   Email: {user_profile.get('email', 'Not set')}")
+        click.echo(f"   Organization: {user_profile.get('org', 'Not set')}")
+        click.echo(f"   Team: {user_profile.get('team', 'Not set')}")
+        click.echo()
+
+        # Default Settings
+        click.echo("⚙️  Default Settings:")
+        click.echo(f"   Region: {config.config.get('default_region', 'Not set')}")
+        click.echo(f"   Expiration: {config.config.get('default_expiration', 'Not set')}")
+        click.echo(f"   SSH Key: {config.config.get('default_key_name', 'Not set')}")
+        click.echo()
+
+        # Default Tags
+        default_tags = config.config.get("default_tags", {})
+        click.echo("🏷️  Default Tags:")
+        for key, value in default_tags.items():
+            click.echo(f"   {key}: {value}")
+        click.echo()
+
+        # AWS Info
+        click.echo("☁️  AWS Info:")
+        click.echo(f"   Account ID: {config.config.get('aws_account_id', 'Not detected')}")
+
+        if not setup_complete:
+            click.echo()
+            click.echo("💡 Run 'platform setup' to complete initial configuration")
+
+
+@cli.command("validate-name")
+@click.argument("cluster_name")
+@click.option("--owner", help="Owner email (defaults to configured email)")
+def validate_name_command(cluster_name, owner):
+    """Validate a cluster name for AWS CloudFormation compatibility"""
+
+    config = check_setup_required()
+
+    if not owner:
+        owner = config.config.get("user_profile", {}).get("email", "user@example.com")
+
+    errors, warnings, deployment_id = validate_cluster_name(cluster_name, owner)
+
+    click.echo(f"🔍 Validating cluster name: '{cluster_name}'")
+    click.echo(f"📋 Generated deployment ID: '{deployment_id}' ({len(deployment_id)} chars)")
+    click.echo()
+
+    if errors:
+        click.echo("❌ Validation Errors:")
+        for error in errors:
+            click.echo(f"   {error}")
+
+        suggested = suggest_shorter_name(cluster_name)
+        if suggested != cluster_name:
+            click.echo(f"\n💡 Suggested name: '{suggested}'")
+
+            # Test the suggested name
+            _, _, suggested_id = validate_cluster_name(suggested, owner)
+            click.echo(f"   Suggested deployment ID: '{suggested_id}' ({len(suggested_id)} chars)")
+
+        print_cluster_name_guidance()
+    elif warnings:
+        click.echo("⚠️  Validation Warnings:")
+        for warning in warnings:
+            click.echo(f"   {warning}")
+        click.echo()
+        click.echo("✅ Name is usable but consider shortening for optimal compatibility")
+    else:
+        click.echo("✅ Cluster name is valid and optimal!")
+        click.echo("   All AWS features will be available")
+
+    # Show feature availability
+    click.echo(f"\n📊 Feature Availability for '{deployment_id}':")
+    if len(deployment_id) <= 30:
+        click.echo("   ✅ All addon policies (externalDNS, certManager, autoScaler)")
+        click.echo("   ✅ Full CloudFormation compatibility")
+    elif len(deployment_id) <= 40:
+        click.echo("   ⚠️  Basic addon policies only (autoScaler)")
+        click.echo("   ⚠️  externalDNS and certManager disabled")
+        click.echo("   ✅ CloudFormation compatible")
+    else:
+        click.echo("   ❌ May cause CloudFormation failures")
+        click.echo("   ❌ All addon policies disabled")
+
+
+@cli.command("suggest-name")
+@click.argument("long_name")
+@click.option("--max-length", default=15, help="Maximum length for suggestion")
+def suggest_name_command(long_name, max_length):
+    """Suggest a shorter cluster name"""
+
+    suggested = suggest_shorter_name(long_name, max_length)
+
+    click.echo(f"Original name: '{long_name}' ({len(long_name)} chars)")
+    click.echo(f"Suggested name: '{suggested}' ({len(suggested)} chars)")
+
+    if suggested != long_name:
+        click.echo(f"💡 Savings: {len(long_name) - len(suggested)} characters")
+
+        # Show what the deployment ID would look like
+        config = check_setup_required()
+        owner = config.config.get("user_profile", {}).get("email", "user@example.com")
+
+        original_deployment_id = generate_deployment_id(long_name, owner)
+        suggested_deployment_id = generate_deployment_id(suggested, owner)
+
+        click.echo(f"\nDeployment ID comparison:")
+        click.echo(f"   Original: '{original_deployment_id}' ({len(original_deployment_id)} chars)")
+        click.echo(f"   Suggested: '{suggested_deployment_id}' ({len(suggested_deployment_id)} chars)")
+    else:
+        click.echo("✅ Name is already optimal length!")
 @click.option("--set-region", help="Set default AWS region")
 @click.option("--set-expiration", help="Set default expiration time")
 @click.option("--set-key-name", help="Set default SSH key name")
