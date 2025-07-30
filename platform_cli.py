@@ -360,11 +360,11 @@ def create_eks_cluster(name, owner, purpose, expires_in, region, preset, eksctl_
 
         try:
             # Use the improved eksctl command with monitoring
-            output = run_eksctl_command_with_monitoring(
+            result = run_eksctl_command_with_monitoring(
                 "create", deployment_dir, eksctl_config_path, deployment_id, region
             )
 
-            if output == "TIMEOUT_BUT_PROGRESSING":
+            if result == "TIMEOUT_BUT_PROGRESSING":
                 # Handle timeout but progressing case
                 metadata["status"] = "creating"
                 metadata["is_running"] = False
@@ -378,7 +378,9 @@ def create_eks_cluster(name, owner, purpose, expires_in, region, preset, eksctl_
                 click.echo(f"📊 Monitor in AWS console: https://console.aws.amazon.com/eks/home?region={region}#/clusters/{deployment_id}")
                 return
 
-            click.echo(output)
+            elif result == "SUCCESS":
+                # Normal successful completion
+                click.echo("🎉 EKS cluster creation completed successfully!")
 
             # Update metadata
             metadata["status"] = "running"
