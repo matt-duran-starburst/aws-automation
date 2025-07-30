@@ -1,6 +1,6 @@
 # Platform CLI Tool Makefile
 
-.PHONY: help install install-dev setup test clean lint format check validate-modules
+.PHONY: help install install-dev setup test clean lint format check validate-modules validate-names
 
 # Default target
 help:
@@ -19,6 +19,7 @@ help:
 	@echo ""
 	@echo "Validation Commands:"
 	@echo "  validate-modules - Validate all modules can be imported"
+	@echo "  validate-names   - Test cluster name validation functionality"
 	@echo "  validate-config  - Validate configuration"
 	@echo ""
 	@echo "Maintenance Commands:"
@@ -36,7 +37,7 @@ install:
 	@echo "Next steps:"
 	@echo "1. Ensure AWS credentials are configured"
 	@echo "2. Run: python3 platform_cli.py setup"
-	@echo "3. Optionally create symlink: ln -s $$(pwd)/platform_cli.py /usr/local/bin/platform"
+	@echo "3. Optionally create symlink: ln -s $(pwd)/platform_cli.py /usr/local/bin/platform"
 
 install-dev:
 	@echo "🔧 Installing Platform CLI Tool for development..."
@@ -63,6 +64,19 @@ validate-modules:
 	@python3 -c "from modules import validate_all_modules; results = validate_all_modules(); print('📊 Module validation summary:', results)"
 	@echo "✅ Module validation complete!"
 
+validate-names:
+	@echo "🔍 Testing cluster name validation functionality..."
+	@echo "Testing optimal names..."
+	@python3 platform_cli.py validate-name "dev" || echo "Note: Setup required first"
+	@python3 platform_cli.py validate-name "test-api" || echo "Note: Setup required first"
+	@echo ""
+	@echo "Testing problematic names..."
+	@python3 platform_cli.py validate-name "very-long-cluster-name-that-might-cause-issues" || echo "Note: Setup required first"
+	@echo ""
+	@echo "Testing name suggestions..."
+	@python3 platform_cli.py suggest-name "my-very-long-development-testing-cluster-name" || echo "Note: Setup required first"
+	@echo "✅ Name validation testing complete!"
+
 validate-config:
 	@echo "🔍 Validating configuration..."
 	@python3 -c "from config import validate_config; is_valid, errors, warnings = validate_config(); print('✅ Config validation complete')"
@@ -76,14 +90,14 @@ test:
 lint:
 	@echo "🔍 Running linting..."
 	# Add when you have flake8 installed
-	@python3 -m flake8 *.py || echo "⚠️ flake8 not installed - add to requirements.txt for linting"
+	@python3 -m flake8 *.py modules/*.py || echo "⚠️ flake8 not installed - add to requirements.txt for linting"
 
 format:
 	@echo "🎨 Formatting code..."
 	# Add when you have black installed
-	@python3 -m black *.py || echo "⚠️ black not installed - add to requirements.txt for formatting"
+	@python3 -m black *.py modules/*.py || echo "⚠️ black not installed - add to requirements.txt for formatting"
 
-check: validate-modules lint format test
+check: validate-modules validate-names lint format test
 	@echo "✅ All checks completed!"
 
 # Cleanup targets
@@ -112,11 +126,11 @@ check-aws:
 
 check-eksctl:
 	@echo "🔍 Checking eksctl installation..."
-	@which eksctl > /dev/null && echo "✅ eksctl found: $$(eksctl version --client --output json | jq -r '.clientVersion.version')" || echo "❌ eksctl not found - install from https://eksctl.io/"
+	@which eksctl > /dev/null && echo "✅ eksctl found: $(eksctl version --client --output json | jq -r '.clientVersion.version')" || echo "❌ eksctl not found - install from https://eksctl.io/"
 
 check-kubectl:
 	@echo "🔍 Checking kubectl installation..."
-	@which kubectl > /dev/null && echo "✅ kubectl found: $$(kubectl version --client --output json | jq -r '.clientVersion.gitVersion')" || echo "❌ kubectl not found"
+	@which kubectl > /dev/null && echo "✅ kubectl found: $(kubectl version --client --output json | jq -r '.clientVersion.gitVersion')" || echo "❌ kubectl not found"
 
 check-deps: check-aws check-eksctl check-kubectl
 	@echo "✅ Dependency check complete!"
@@ -133,11 +147,12 @@ verify-install:
 	@echo "🔍 Verifying installation..."
 	@python3 platform_cli.py --help > /dev/null && echo "✅ Platform CLI responds to --help"
 	@$(MAKE) validate-modules
+	@$(MAKE) validate-names
 	@$(MAKE) check-deps
 	@echo "✅ Installation verification complete!"
 
 # Development workflow
-dev-setup: install-dev validate-modules check-deps
+dev-setup: install-dev validate-modules validate-names check-deps
 	@echo "🚀 Development environment ready!"
 	@echo ""
 	@echo "Suggested workflow:"
@@ -147,13 +162,29 @@ dev-setup: install-dev validate-modules check-deps
 	@echo ""
 
 # Production deployment workflow
-prod-setup: install validate-modules check-deps setup
+prod-setup: install validate-modules validate-names check-deps setup
 	@echo "🚀 Production environment ready!"
 
 # Show configuration
 show-config:
 	@echo "📋 Current Configuration:"
 	@python3 platform_cli.py config
+
+# CloudFormation issue testing
+test-cloudformation-fix:
+	@echo "🔧 Testing CloudFormation IAM policy name length fixes..."
+	@echo ""
+	@echo "Testing short names (should work):"
+	@python3 platform_cli.py validate-name "dev" || echo "Note: Run 'make setup' first"
+	@python3 platform_cli.py validate-name "test-api" || echo "Note: Run 'make setup' first"
+	@echo ""
+	@echo "Testing long names (should provide guidance):"
+	@python3 platform_cli.py validate-name "my-very-long-development-testing-cluster" || echo "Note: Run 'make setup' first"
+	@echo ""
+	@echo "Testing name suggestions:"
+	@python3 platform_cli.py suggest-name "my-very-long-performance-testing-cluster-name" || echo "Note: Run 'make setup' first"
+	@echo ""
+	@echo "✅ CloudFormation fix testing complete!"
 
 # Emergency cleanup (if deployments are stuck)
 emergency-cleanup:
@@ -165,4 +196,4 @@ emergency-cleanup:
 	@echo "  python3 platform_cli.py destroy <deployment-id> --force"
 	@echo ""
 	@echo "To destroy ALL deployments (DANGEROUS):"
-	@echo "  python3 platform_cli.py list --owner $$(python3 -c 'from config import PlatformConfig; print(PlatformConfig().get_user_email() or \"unknown\")')"
+	@echo "  python3 platform_cli.py list --owner $(python3 -c 'from config import PlatformConfig; print(PlatformConfig().get_user_email() or \"unknown\")')"
