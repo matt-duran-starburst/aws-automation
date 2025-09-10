@@ -1,0 +1,97 @@
+name: Epic
+description: Create a new epic for major feature development
+title: 'Epic: [Epic Name]'
+labels: ['epic', 'planning']
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Epic Template
+        Use this template to create epics that group related functionality.
+        
+  - type: input
+    id: epic-name
+    attributes:
+      label: Epic Name
+      description: Short, descriptive name for this epic
+      placeholder: "Multi-Cloud Data Sources"
+    validations:
+      required: true
+      
+  - type: textarea
+    id: overview
+    attributes:
+      label: Epic Overview
+      description: Brief description of what this epic accomplishes
+      placeholder: "This epic enables the platform to connect to data sources across AWS, GCP, and Azure..."
+    validations:
+      required: true
+      
+  - type: textarea
+    id: business-value
+    attributes:
+      label: Business Value
+      description: Why this epic matters and what business value it delivers
+      placeholder: "Enables customer reproduction scenarios across multiple cloud providers..."
+    validations:
+      required: true
+      
+  - type: textarea
+    id: tasks
+    attributes:
+      label: Major Tasks/Components
+      description: High-level tasks that will be broken into individual issues
+      placeholder: |
+        - [ ] AWS infrastructure setup
+        - [ ] GCP infrastructure setup  
+        - [ ] Azure infrastructure setup
+        - [ ] Cross-cloud connectivity testing
+      value: |
+        - [ ] Task 1
+        - [ ] Task 2
+        - [ ] Task 3
+    validations:
+      required: true
+      
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Epic Acceptance Criteria
+      description: High-level criteria that define epic completion
+      placeholder: |
+        - [ ] All cloud providers accessible via local kind cluster
+        - [ ] Automated provisioning and deprovisioning
+        - [ ] End-to-end testing completed
+      value: |
+        - [ ] Criteria 1
+        - [ ] Criteria 2
+        - [ ] Criteria 3
+    validations:
+      required: true
+      
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: Epic priority level
+      options:
+        - Critical
+        - High
+        - Medium
+        - Low
+    validations:
+      required: true
+      
+  - type: dropdown
+    id: effort
+    attributes:
+      label: Estimated Effort
+      description: Rough effort estimate for the entire epic
+      options:
+        - "1-2 weeks"
+        - "3-4 weeks"
+        - "1-2 months"
+        - "3+ months"
+    validations:
+      required: true
