@@ -1,0 +1,84 @@
+name: Task
+description: Create a specific task or feature
+title: '[Component] Task Description'
+labels: ['task']
+assignees: []
+body:
+  - type: input
+    id: component
+    attributes:
+      label: Component
+      description: Which part of the system does this affect?
+      placeholder: "CLI, Infrastructure, Helm, Documentation"
+    validations:
+      required: true
+      
+  - type: textarea
+    id: description
+    attributes:
+      label: Task Description
+      description: What specifically needs to be implemented?
+      placeholder: "Implement Pulumi module for AWS bastion host deployment..."
+    validations:
+      required: true
+      
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Specific, testable criteria for task completion
+      placeholder: |
+        - [ ] Pulumi module creates EC2 instance with security groups
+        - [ ] SSH key pair is generated and stored securely
+        - [ ] Health check endpoint responds correctly
+      value: |
+        - [ ] Specific requirement 1
+        - [ ] Specific requirement 2
+        - [ ] Specific requirement 3
+    validations:
+      required: true
+      
+  - type: input
+    id: epic-link
+    attributes:
+      label: Related Epic
+      description: Link to the epic this task belongs to (issue number)
+      placeholder: "#123"
+      
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: Task priority
+      options:
+        - Critical
+        - High  
+        - Medium
+        - Low
+    validations:
+      required: true
+      
+  - type: dropdown
+    id: effort
+    attributes:
+      label: Effort Estimate
+      description: How much work is this task?
+      options:
+        - "XS (1-2 hours)"
+        - "S (half day)"
+        - "M (1-2 days)"
+        - "L (3-5 days)"
+        - "XL (1+ weeks)"
+    validations:
+      required: true
+      
+  - type: checkboxes
+    id: clouds
+    attributes:
+      label: Cloud Providers
+      description: Which cloud providers does this affect?
+      options:
+        - label: AWS
+        - label: GCP
+        - label: Azure
+        - label: Local/Kind
