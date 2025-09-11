@@ -39,22 +39,30 @@ def create_local_cluster(name, preset, starburst):
     cluster_config = create_kind_cluster(name, preset)
 
     if starburst:
-        click.echo("📊 Deploying Starburst Enterprise Platform...")
-        deploy_starburst(name, preset)
+        click.echo("📊 Preparing cluster for Starburst deployment...")
+        result = deploy_starburst(name, preset)
+        if not result["success"]:
+            click.echo(f"⚠️  Starburst preparation failed: {result['error']}")
 
     click.echo(f"✅ Local cluster '{name}' ready!")
-    click.echo(f"💡 Enable data sources with: platform connect enable <source>")
+    click.echo(f"💡 Next steps:")
+    click.echo(f"   • Enable data sources: python3 platform_cli.py connect enable <source>")
+    if starburst:
+        click.echo(f"   • Starburst namespace and values file prepared")
+        click.echo(f"   • Deploy with your Harbor credentials using the provided Helm commands")
+    else:
+        click.echo(f"   • Prepare for Starburst: python3 platform_cli.py starburst prepare --cluster {name}")
 
 @local.command("destroy")
-@click.argument("cluster_name")
+@click.option("--name", required=True, help="Local cluster name to destroy")
 @click.option("--force", is_flag=True, help="Skip confirmation")
-def destroy_local_cluster(cluster_name, force):
+def destroy_local_cluster(name, force):
     """Destroy a local Kind cluster"""
     if not force:
-        click.confirm(f"Destroy local cluster '{cluster_name}'?", abort=True)
+        click.confirm(f"Destroy local cluster '{name}'?", abort=True)
 
-    destroy_kind_cluster(cluster_name)
-    click.echo(f"✅ Local cluster '{cluster_name}' destroyed")
+    destroy_kind_cluster(name)
+    click.echo(f"✅ Local cluster '{name}' destroyed")
 
 @local.command("list")
 def list_local_clusters_cmd():
@@ -135,28 +143,50 @@ def starburst():
     """Manage Starburst Enterprise Platform deployments"""
     pass
 
-@starburst.command("deploy")
+@starburst.command("prepare")
 @click.option("--cluster", required=True, help="Target local cluster")
-@click.option("--config-from-case", help="Generate config from support case")
-@click.option("--values-file", help="Custom Helm values file")
-def deploy_starburst_cmd(cluster, config_from_case, values_file):
-    """Deploy Starburst to a local cluster"""
-    click.echo(f"📊 Deploying Starburst to cluster '{cluster}'...")
+@click.option("--preset", default="development", 
+              type=click.Choice(['development', 'performance', 'customer-reproduction']),
+              help="Starburst deployment preset")
+def prepare_starburst_cmd(cluster, preset):
+    """Prepare cluster for Starburst deployment (namespace, values file)"""
+    result = deploy_starburst(cluster, preset)
+    if not result["success"]:
+        click.echo(f"❌ Failed to prepare cluster: {result['error']}")
+        raise click.Abort()
 
-    if config_from_case:
-        # Generate configuration based on customer case
-        click.echo(f"🔍 Generating config from case: {config_from_case}")
+@starburst.command("cleanup")
+@click.option("--cluster", required=True, help="Target local cluster")
+def cleanup_starburst_cmd(cluster):
+    """Clean up Starburst preparation artifacts"""
+    result = undeploy_starburst(cluster)
+    if not result["success"]:
+        click.echo(f"❌ Failed to cleanup: {result['error']}")
+        raise click.Abort()
 
-    deploy_starburst(cluster, config_from_case, values_file)
-
-    click.echo("✅ Starburst deployed successfully!")
-
-@starburst.command("undeploy")
-@click.argument("cluster")
-def undeploy_starburst_cmd(cluster):
-    """Remove Starburst from a local cluster"""
-    undeploy_starburst(cluster)
-    click.echo("✅ Starburst undeployed")
+@starburst.command("status")
+@click.option("--cluster", required=True, help="Target local cluster")
+def starburst_status_cmd(cluster):
+    """Check Starburst deployment status"""
+    from modules.starburst_module import get_deployment_status
+    status = get_deployment_status(cluster)
+    
+    click.echo(f"📊 Starburst Status for cluster '{cluster}':")
+    click.echo(f"   Deployed: {'✅ Yes' if status['deployed'] else '❌ No'}")
+    
+    if status["deployed"]:
+        click.echo(f"   Pods: {len(status['pods'])}")
+        for pod_name, pod_info in status["pods"].items():
+            status_icon = "✅" if pod_info["ready"] else "❌"
+            click.echo(f"     {status_icon} {pod_name}: {pod_info['status']}")
+        
+        click.echo(f"   Services: {len(status['services'])}")
+        for svc_name, svc_info in status["services"].items():
+            click.echo(f"     🔗 {svc_name}: {svc_info['type']}")
+    
+    click.echo(f"\n💡 To deploy Starburst manually:")
+    click.echo(f"   helm registry login harbor.starburstdata.net -u <username> -p <password>")
+    click.echo(f"   helm upgrade --install starburst-{cluster} oci://harbor.starburstdata.net/starburst-enterprise/starburst-enterprise --namespace starburst")
 
 # ============================================================================
 # SHARED INFRASTRUCTURE MANAGEMENT (Admin)
