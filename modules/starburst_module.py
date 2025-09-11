@@ -29,8 +29,26 @@ VALUES_DIR.mkdir(exist_ok=True)
 # Starburst deployment presets
 STARBURST_PRESETS = {
     "development": {
-        "name": "development",
-        "description": "Lightweight development setup",
+        "name": "development", 
+        "description": "Minimal resources for local Kind clusters",
+        "coordinator": {
+            "resources": {
+                "requests": {"memory": "512Mi", "cpu": "0.25"},
+                "limits": {"memory": "1Gi", "cpu": "0.5"}
+            }
+        },
+        "worker": {
+            "replicas": 1,
+            "resources": {
+                "requests": {"memory": "768Mi", "cpu": "0.5"},
+                "limits": {"memory": "1.5Gi", "cpu": "1"}
+            }
+        },
+        "catalogs": ["memory", "jmx"]
+    },
+    "performance": {
+        "name": "performance",
+        "description": "Moderate resources for testing (requires 4GB+ Docker)",
         "coordinator": {
             "resources": {
                 "requests": {"memory": "1Gi", "cpu": "0.5"},
@@ -40,15 +58,15 @@ STARBURST_PRESETS = {
         "worker": {
             "replicas": 1,
             "resources": {
-                "requests": {"memory": "2Gi", "cpu": "1"},
-                "limits": {"memory": "4Gi", "cpu": "2"}
+                "requests": {"memory": "1.5Gi", "cpu": "0.75"},
+                "limits": {"memory": "3Gi", "cpu": "1.5"}
             }
         },
-        "catalogs": ["memory", "jmx"]
+        "catalogs": ["memory", "jmx", "tpch"]
     },
-    "performance": {
-        "name": "performance",
-        "description": "Performance testing setup",
+    "customer-reproduction": {
+        "name": "customer-reproduction",
+        "description": "Production-like resources (requires 8GB+ Docker)",
         "coordinator": {
             "resources": {
                 "requests": {"memory": "2Gi", "cpu": "1"},
@@ -58,26 +76,8 @@ STARBURST_PRESETS = {
         "worker": {
             "replicas": 2,
             "resources": {
-                "requests": {"memory": "4Gi", "cpu": "2"},
-                "limits": {"memory": "8Gi", "cpu": "4"}
-            }
-        },
-        "catalogs": ["memory", "jmx", "tpch"]
-    },
-    "customer-reproduction": {
-        "name": "customer-reproduction",
-        "description": "Customer environment reproduction",
-        "coordinator": {
-            "resources": {
-                "requests": {"memory": "4Gi", "cpu": "2"},
-                "limits": {"memory": "8Gi", "cpu": "4"}
-            }
-        },
-        "worker": {
-            "replicas": 3,
-            "resources": {
-                "requests": {"memory": "8Gi", "cpu": "4"},
-                "limits": {"memory": "16Gi", "cpu": "8"}
+                "requests": {"memory": "2Gi", "cpu": "1"},
+                "limits": {"memory": "4Gi", "cpu": "2"}
             }
         },
         "catalogs": ["memory", "jmx", "tpch", "tpcds"]
@@ -170,6 +170,52 @@ def create_namespace() -> Dict[str, Any]:
     
     return result
 
+def check_starburst_resource_requirements(preset: str) -> Dict[str, Any]:
+    """Check if the preset fits within typical Docker Desktop limits"""
+    if preset not in STARBURST_PRESETS:
+        return {"warning": None}
+    
+    preset_config = STARBURST_PRESETS[preset]
+    
+    # Calculate total memory requirements (requests)
+    coord_memory = preset_config["coordinator"]["resources"]["requests"]["memory"]
+    worker_memory = preset_config["worker"]["resources"]["requests"]["memory"]
+    worker_replicas = preset_config["worker"]["replicas"]
+    
+    # Convert to MB for easier calculation
+    def parse_memory(mem_str):
+        if mem_str.endswith('Gi'):
+            return float(mem_str[:-2]) * 1024
+        elif mem_str.endswith('Mi'):
+            return float(mem_str[:-2])
+        return 0
+    
+    coord_mb = parse_memory(coord_memory)
+    worker_mb = parse_memory(worker_memory) * worker_replicas
+    total_mb = coord_mb + worker_mb
+    
+    # Add PostgreSQL (~256MB) and system overhead (~512MB)
+    total_with_overhead = total_mb + 256 + 512
+    
+    result = {"warning": None, "suggestions": []}
+    
+    if total_with_overhead > 6000:  # > 6GB
+        result["warning"] = f"Preset '{preset}' requires ~{total_with_overhead/1024:.1f}GB memory"
+        result["suggestions"] = [
+            "Increase Docker Desktop memory to 8GB+ in Settings → Resources",
+            "Use 'development' preset for minimal resource usage",
+            "Close other applications to free up memory"
+        ]
+    elif total_with_overhead > 3000:  # > 3GB  
+        result["warning"] = f"Preset '{preset}' requires ~{total_with_overhead/1024:.1f}GB memory"
+        result["suggestions"] = [
+            "Ensure Docker Desktop has 4GB+ memory in Settings → Resources",
+            "Consider 'development' preset if deployment fails"
+        ]
+    
+    return result
+
+
 def generate_values_file(preset: str, connected_sources: List[str] = None, cluster_name: str = "default") -> Dict[str, Any]:
     """Generate Helm values file for Starburst deployment"""
     if preset not in STARBURST_PRESETS:
@@ -199,10 +245,16 @@ def generate_values_file(preset: str, connected_sources: List[str] = None, clust
                 }
             ]
         },
-        "service": {
-            "type": "NodePort",
-            "ports": {
-                "http": {"port": 8080, "nodePort": 30080}
+        "expose": {
+            "type": "nodePort",
+            "nodePort": {
+                "name": "starburst",
+                "ports": {
+                    "http": {
+                        "port": 8080,
+                        "nodePort": 30080
+                    }
+                }
             }
         },
         # External PostgreSQL database for Starburst metadata
@@ -296,6 +348,14 @@ def prepare_starburst_deployment(cluster_name: str, preset: str = "development",
     click.echo(f"   Cluster: {cluster_name}")
     click.echo(f"   Preset: {preset}")
     click.echo(f"   Connected sources: {len(connected_sources)}")
+    
+    # Check resource requirements and warn user
+    resource_check = check_starburst_resource_requirements(preset)
+    if resource_check["warning"]:
+        click.echo(f"⚠️  {resource_check['warning']}")
+        if resource_check.get("suggestions"):
+            for suggestion in resource_check["suggestions"]:
+                click.echo(f"   💡 {suggestion}")
     
     # Create namespace
     namespace_result = create_namespace()
