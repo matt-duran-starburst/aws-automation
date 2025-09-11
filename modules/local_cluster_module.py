@@ -192,6 +192,9 @@ def create_kind_cluster(cluster_name, preset="development"):
         # Set up additional features
         setup_cluster_features(cluster_name, preset_config)
 
+        # Switch to the new cluster context automatically
+        switch_context_result = switch_kubectl_context(cluster_name)
+        
         # Save cluster metadata
         metadata = {
             "name": cluster_name,
@@ -199,7 +202,8 @@ def create_kind_cluster(cluster_name, preset="development"):
             "created_at": datetime.now().isoformat(),
             "kind_config_file": str(config_file),
             "features": preset_config["features"],
-            "status": "running"
+            "status": "running",
+            "context_switched": switch_context_result
         }
 
         metadata_file = cluster_dir / "metadata.json"
@@ -211,7 +215,13 @@ def create_kind_cluster(cluster_name, preset="development"):
         click.echo(f"   Name: {cluster_name}")
         click.echo(f"   Preset: {preset}")
         click.echo(f"   Kubeconfig context: kind-{cluster_name}")
-        click.echo(f"   Access: kubectl --context kind-{cluster_name} get nodes")
+        click.echo(f"\n🔧 kubectl Commands:")
+        click.echo(f"   Switch context: kubectl config use-context kind-{cluster_name}")
+        click.echo(f"   Check nodes:    kubectl get nodes")
+        click.echo(f"   Check pods:     kubectl get pods -A")
+        click.echo(f"\n💡 Next Steps:")
+        click.echo(f"   Deploy Starburst: python3 platform_cli.py starburst deploy --cluster {cluster_name}")
+        click.echo(f"   Enable data sources: python3 platform_cli.py connect enable <source>")
 
         return metadata
 
@@ -256,6 +266,20 @@ def setup_cluster_features(cluster_name, preset_config):
     # Set up local registry if enabled
     if preset_config["features"].get("registry"):
         setup_local_registry(cluster_name)
+
+
+def switch_kubectl_context(cluster_name):
+    """Switch kubectl context to the new Kind cluster"""
+    context_name = f"kind-{cluster_name}"
+    
+    try:
+        cmd = ['kubectl', 'config', 'use-context', context_name]
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        click.echo(f"✅ Switched kubectl context to: {context_name}")
+        return True
+    except subprocess.CalledProcessError as e:
+        click.echo(f"⚠️ Warning: Failed to switch kubectl context: {e}")
+        return False
 
 
 def setup_local_registry(cluster_name):
