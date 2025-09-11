@@ -1,1480 +1,217 @@
 #!/usr/bin/env python3
 """
-Platform CLI Tool for AWS EKS/Starburst Deployments
-Refactored version with modular architecture
-
-Renamed from platform.py to platform_cli.py to avoid stdlib conflict
+Platform CLI Tool for Local Development with Shared Cloud Data Sources
+New architecture: Local Kind clusters + Shared cloud databases + Connectivity layer
 """
 
 import click
-import json
-import os
-import subprocess
-import yaml
-from datetime import datetime
-
-# Import our modules
-from config import PlatformConfig, PLATFORM_DIR, DEPLOYMENTS_DIR, CONFIG_FILE
-from modules.utils_module import (
-    validate_aws_credentials, check_setup_required, get_vpc_subnets,
-    parse_expiration, generate_deployment_id, create_deployment_metadata,
-    load_deployment_metadata, save_deployment_metadata, list_deployments,
-    print_deployments_table, confirm_action, sanitize_name,
-    validate_cluster_name, suggest_shorter_name, print_cluster_name_guidance
-)
-from modules.eks_module import (
-    scale_eks_nodegroups, run_eksctl_command, generate_eksctl_config,
-    get_cluster_vpc_info, update_kubeconfig, smart_subnet_selection,
-    validate_cluster_requirements, run_eksctl_command_with_monitoring
-)
-from modules.rds_module import (
-    create_rds_instance, get_rds_instance_status, delete_rds_instance,
-    get_connection_string, validate_engine_requirements, DATABASE_ENGINES
-)
-from modules.s3_module import (
-    locate_s3_bucket, create_s3_bucket, delete_s3_bucket, get_bucket_info,
-    list_platform_buckets, validate_bucket_name
-)
-
+from modules.local_cluster_module import create_kind_cluster, destroy_kind_cluster, list_local_clusters
+from modules.connectivity_module import enable_data_source, disable_data_source, get_connection_info
+from modules.starburst_module import deploy_starburst, undeploy_starburst
+from modules.shared_data_module import list_available_sources, get_source_status
+from modules.pulumi_module import provision_shared_infrastructure, destroy_shared_infrastructure
 
 @click.group()
 def cli():
-    """Platform CLI for AWS EKS/Starburst deployments"""
+    """Platform CLI for local development with shared cloud data sources"""
     pass
 
+# ============================================================================
+# LOCAL CLUSTER MANAGEMENT
+# ============================================================================
 
 @cli.group()
-def create():
-    """Create new deployments"""
+def local():
+    """Manage local Kind clusters for development"""
     pass
 
-
-@cli.command("setup")
-def setup():
-    """Initial platform setup - configure your profile and tags"""
-
-    # Validate AWS credentials first
-    validate_aws_credentials()
-
-    config = PlatformConfig()
-
-    click.echo("🔧 Platform Tool Initial Setup")
-    click.echo("This will configure your profile and tagging information.")
-    click.echo()
-
-    # User profile information
-    click.echo("👤 User Profile:")
-    name = click.prompt("Your name (for tagging)",
-                       default=config.config.get("user_profile", {}).get("name", ""))
-    email = click.prompt("Your email address",
-                        default=config.config.get("user_profile", {}).get("email", ""))
-
-    # Organizational information
-    click.echo("\n🏢 Organization Information:")
-    org = click.prompt("Organization/Department (e.g., 'cs', 'sales', 'engineering')",
-                      default=config.config.get("user_profile", {}).get("org", "cs"))
-    team = click.prompt("Team (e.g., 'tse', 'tam', 'cse', 'sa')",
-                       default=config.config.get("user_profile", {}).get("team", "tse"))
-
-    # Environment and cloud settings
-    click.echo("\n☁️ Default Settings:")
-    environment = click.prompt("Default environment",
-                              default=config.config.get("default_tags", {}).get("environment", "demo"))
-    region = click.prompt("Default AWS region",
-                         default=config.config.get("default_region", "us-east-1"))
-    key_name = click.prompt("Default SSH key name",
-                           default=config.config.get("default_key_name", "en-field-key"))
-
-    # Update configuration
-    config.config.update({
-        "default_region": region,
-        "default_key_name": key_name,
-        "user_profile": {
-            "name": name,
-            "email": email,
-            "org": org,
-            "team": team
-        },
-        "default_tags": {
-            "cloud": "aws",
-            "environment": environment,
-            "org": org,
-            "team": team
-        },
-        "setup_complete": True
-    })
-
-    config.save_config()
-
-    click.echo("\n✅ Setup completed!")
-    click.echo("\n📋 Your configuration:")
-    click.echo(f"   Name: {name}")
-    click.echo(f"   Email: {email}")
-    click.echo(f"   Organization: {org}")
-    click.echo(f"   Team: {team}")
-    click.echo(f"   Environment: {environment}")
-    click.echo(f"   Default Region: {region}")
-    click.echo(f"   SSH Key: {key_name}")
-    click.echo()
-    click.echo("These tags will be automatically applied to all resources you create.")
-    click.echo("You can modify them anytime with 'platform config --help'")
-
-
-@create.command("eks-cluster")
-@click.option("--name", required=True, help="Cluster name")
-@click.option("--owner", help="Owner email address (defaults to your configured email)")
-@click.option("--purpose", default="testing", help="Purpose of deployment")
-@click.option("--expires-in", default="7d", help="Expiration time (e.g., '3d', '1w', '2h')")
-@click.option("--region", help="AWS region (defaults to config)")
+@local.command("create")
+@click.option("--name", required=True, help="Local cluster name")
 @click.option("--preset", default="development",
-              type=click.Choice(['development', 'performance', 'demo']),
+              type=click.Choice(['development', 'performance', 'customer-reproduction']),
               help="Cluster preset configuration")
-@click.option("--eksctl-config", help="Path to existing eksctl config file")
-@click.option("--auto-select-subnets", is_flag=True, help="Automatically select first available private subnets")
-@click.option("--force-long-name", is_flag=True, help="Skip cluster name length validation (advanced)")
-@click.option("--skip-validation", is_flag=True, help="Skip pre-flight validation checks")
-def create_eks_cluster(name, owner, purpose, expires_in, region, preset, eksctl_config,
-                      auto_select_subnets, force_long_name, skip_validation):
-    """Create a new EKS cluster using eksctl"""
+@click.option("--starburst", is_flag=True, help="Auto-deploy Starburst after cluster creation")
+def create_local_cluster(name, preset, starburst):
+    """Create a local Kind cluster optimized for Starburst"""
+    click.echo(f"🚀 Creating local Kind cluster: {name}")
 
-    # Check if setup is complete
-    config = check_setup_required()
+    # Create Kind cluster with preset configuration
+    cluster_config = create_kind_cluster(name, preset)
 
-    # Validate AWS credentials
-    identity = validate_aws_credentials()
+    if starburst:
+        click.echo("📊 Preparing cluster for Starburst deployment...")
+        result = deploy_starburst(name, preset)
+        if not result["success"]:
+            click.echo(f"⚠️  Starburst preparation failed: {result['error']}")
 
-    # Use configured email if owner not provided
-    if not owner:
-        owner = config.config.get("user_profile", {}).get("email")
-        if not owner:
-            click.echo("❌ No owner email specified and none configured. Run 'platform setup' or provide --owner")
-            raise click.Abort()
-
-    # Validate cluster name unless force flag is used
-    if not force_long_name:
-        errors, warnings, test_deployment_id = validate_cluster_name(name, owner)
-
-        if errors:
-            click.echo("❌ Cluster name validation failed:")
-            for error in errors:
-                click.echo(f"   {error}")
-
-            # Suggest a shorter name
-            suggested = suggest_shorter_name(name)
-            if suggested != name:
-                click.echo(f"\n💡 Suggested shorter name: '{suggested}'")
-                click.echo(f"   Use: --name {suggested}")
-
-            print_cluster_name_guidance()
-            click.echo("Or use --force-long-name to skip validation (may cause deployment failures)")
-            raise click.Abort()
-
-        if warnings:
-            click.echo("⚠️  Cluster name warnings:")
-            for warning in warnings:
-                click.echo(f"   {warning}")
-            click.echo()
-
-    # Parse expiration
-    expires_at = parse_expiration(expires_in)
-
-    # Use configured region if not provided
-    if not region:
-        region = config.config["default_region"]
-
-    # Generate deployment ID
-    deployment_id = generate_deployment_id(name, owner)
-    deployment_dir = DEPLOYMENTS_DIR / deployment_id
-
-    click.echo(f"🚀 Creating EKS cluster: {deployment_id}")
-    click.echo(f"📅 Expires: {expires_at.strftime('%Y-%m-%d %H:%M:%S')}")
-    click.echo(f"🌍 Region: {region}")
-    click.echo(f"⚙️  Preset: {preset}")
-    click.echo(f"👤 Owner: {owner}")
-
-    # Show deployment ID length info
-    if len(deployment_id) > 30:
-        click.echo(f"⚠️  Long cluster name ({len(deployment_id)} chars) - some features disabled")
-
-    # Create deployment directory
-    deployment_dir.mkdir(exist_ok=True)
-
-    # Handle eksctl configuration
-    if eksctl_config:
-        # Use provided eksctl config
-        click.echo(f"📋 Using provided eksctl config: {eksctl_config}")
-        import shutil
-        shutil.copy(eksctl_config, deployment_dir / "cluster.yaml")
-        eksctl_config_path = "cluster.yaml"
+    click.echo(f"✅ Local cluster '{name}' ready!")
+    click.echo(f"💡 Next steps:")
+    click.echo(f"   • Enable data sources: python3 platform_cli.py connect enable <source>")
+    if starburst:
+        click.echo(f"   • Starburst namespace and values file prepared")
+        click.echo(f"   • Deploy with your Harbor credentials using the provided Helm commands")
     else:
-        # Generate eksctl config
-        click.echo("🔍 Fetching available subnets...")
-        subnets = get_vpc_subnets(region)
+        click.echo(f"   • Prepare for Starburst: python3 platform_cli.py starburst prepare --cluster {name}")
 
-        if not subnets:
-            click.echo("❌ No subnets found in region")
-            raise click.Abort()
-
-        # Filter private subnets
-        private_subnets = [s for s in subnets if s['type'] == 'private']
-
-        if not private_subnets:
-            click.echo("❌ No private subnets found")
-            raise click.Abort()
-
-        if auto_select_subnets:
-            # Use smart auto-selection with multi-AZ support
-            try:
-                selected_subnets = smart_subnet_selection(subnets, min_azs=2)
-                click.echo(f"✅ Auto-selected {len(selected_subnets)} subnets across {len(set(s['az'] for s in selected_subnets))} AZs")
-                for subnet in selected_subnets:
-                    click.echo(f"   - {subnet['name']} ({subnet['id']}) in {subnet['az']}")
-            except Exception as e:
-                click.echo(f"❌ Auto-selection failed: {e}")
-                raise click.Abort()
-
-        else:
-            # Interactive subnet selection - group by VPC for better UX
-            vpcs = {}
-            for subnet in private_subnets:
-                vpc_id = subnet['vpc_id']
-                if vpc_id not in vpcs:
-                    vpcs[vpc_id] = []
-                vpcs[vpc_id].append(subnet)
-
-            # Show subnets grouped by VPC
-            click.echo("\n📋 Available private subnets grouped by VPC:")
-            subnet_choices = []
-            choice_index = 1
-
-            for vpc_id, vpc_subnets in vpcs.items():
-                click.echo(f"\n  VPC: {vpc_id}")
-                # Show AZ distribution for this VPC
-                vpc_azs = set(s['az'] for s in vpc_subnets)
-                click.echo(f"      AZs available: {len(vpc_azs)} ({', '.join(sorted(vpc_azs))})")
-
-                for subnet in vpc_subnets:
-                    click.echo(f"    {choice_index}. {subnet['name']} ({subnet['id']}) - {subnet['az']} - {subnet['cidr']}")
-                    subnet_choices.append(subnet)
-                    choice_index += 1
-
-            click.echo("\n⚠️  Important: All selected subnets must be from the same VPC!")
-            click.echo("💡 Tip: Choose subnets from different AZs for better availability")
-
-            selected_indices = click.prompt(
-                "Select subnets (comma-separated numbers, e.g., 1,2,3)",
-                type=str
-            )
-
-            try:
-                indices = [int(x.strip()) - 1 for x in selected_indices.split(',')]
-                selected_subnets = [subnet_choices[i] for i in indices]
-
-                # Validate all subnets are from the same VPC
-                vpc_ids = set(subnet['vpc_id'] for subnet in selected_subnets)
-                if len(vpc_ids) > 1:
-                    click.echo(f"❌ Selected subnets are from different VPCs: {vpc_ids}")
-                    click.echo("Please select subnets from the same VPC only.")
-                    raise click.Abort()
-
-                # Validate we have subnets in different AZs
-                azs = set(subnet['az'] for subnet in selected_subnets)
-                if len(azs) < 2:
-                    click.echo("⚠️ Warning: Selected subnets are all in the same AZ")
-                    click.echo("This reduces availability and fault tolerance.")
-                    if not confirm_action("Continue anyway?"):
-                        raise click.Abort()
-
-            except (ValueError, IndexError):
-                click.echo("❌ Invalid subnet selection")
-                raise click.Abort()
-
-        click.echo(f"✅ Selected {len(selected_subnets)} subnets")
-
-        # Run pre-flight validation unless skipped
-        if not skip_validation:
-            # Get instance types for validation based on preset
-            preset_instances = {
-                "demo": ["t3.medium", "t3.large"],
-                "development": ["m5.large", "m5.xlarge", "m6i.large"],
-                "performance": ["m5.xlarge", "m6i.xlarge", "m5.2xlarge"]
-            }
-
-            test_instances = preset_instances.get(preset, ["m5.large", "m5.xlarge"])
-            errors, warnings = validate_cluster_requirements(test_instances, region, "SPOT")
-
-            if errors:
-                click.echo("❌ Pre-flight validation failed:")
-                for error in errors:
-                    click.echo(f"   {error}")
-                click.echo("💡 Try a different region, instance types, or use --skip-validation")
-                raise click.Abort()
-
-            if warnings:
-                click.echo("⚠️ Pre-flight validation warnings:")
-                for warning in warnings:
-                    click.echo(f"   {warning}")
-                if not confirm_action("Continue with warnings?"):
-                    raise click.Abort()
-
-            click.echo("✅ Pre-flight validation passed")
-
-        # Generate eksctl config
-        eksctl_config_data = generate_eksctl_config(
-            deployment_id, owner, region, selected_subnets, preset, expires_at, config
-        )
-
-        # Save eksctl config
-        eksctl_config_path = deployment_dir / "cluster.yaml"
-        with open(eksctl_config_path, 'w') as f:
-            yaml.dump(eksctl_config_data, f, default_flow_style=False)
-
-        eksctl_config_path = "cluster.yaml"
-
-        click.echo(f"📝 Generated eksctl config: {deployment_dir / 'cluster.yaml'}")
-
-    # Create metadata
-    metadata = create_deployment_metadata(
-        deployment_id, name, owner, purpose, expires_at, "eks-cluster", region
-    )
-    metadata["eksctl_config"] = eksctl_config_path
-    metadata["preset"] = preset
-    metadata["is_running"] = False  # Track if cluster is running or stopped
-
-    # Save metadata
-    save_deployment_metadata(deployment_id, metadata)
-
-    # Show config preview
-    click.echo("\n📋 Cluster configuration preview:")
-    with open(deployment_dir / eksctl_config_path, 'r') as f:
-        config_preview = f.read()
-        # Show first 20 lines
-        lines = config_preview.split('\n')[:20]
-        click.echo('\n'.join(lines))
-        if len(config_preview.split('\n')) > 20:
-            click.echo("...")
-
-    if confirm_action("\nProceed with cluster creation?"):
-        click.echo("🚀 Creating EKS cluster (this may take 15-25 minutes)...")
-        click.echo("💡 Tip: This process is now more robust with better error handling")
-
-        try:
-            # Use the improved eksctl command with monitoring
-            result = run_eksctl_command_with_monitoring(
-                "create", deployment_dir, eksctl_config_path, deployment_id, region
-            )
-
-            if result == "TIMEOUT_BUT_PROGRESSING":
-                # Handle timeout but progressing case
-                metadata["status"] = "creating"
-                metadata["is_running"] = False
-                metadata["created_date"] = datetime.now().isoformat()
-                metadata["notes"] = "Creation timed out but cluster may still be progressing"
-
-                save_deployment_metadata(deployment_id, metadata)
-
-                click.echo("⏰ Cluster creation timed out but is likely still progressing")
-                click.echo(f"🔍 Check status with: platform status {deployment_id}")
-                click.echo(f"📊 Monitor in AWS console: https://console.aws.amazon.com/eks/home?region={region}#/clusters/{deployment_id}")
-                return
-
-            elif result == "SUCCESS":
-                # Normal successful completion
-                click.echo("🎉 EKS cluster creation completed successfully!")
-
-            # Update metadata
-            metadata["status"] = "running"
-            metadata["is_running"] = True
-            metadata["created_date"] = datetime.now().isoformat()
-
-            save_deployment_metadata(deployment_id, metadata)
-
-            click.echo("✅ EKS cluster created successfully!")
-            click.echo(f"📁 Deployment directory: {deployment_dir}")
-            click.echo(f"🎯 Update kubeconfig: aws eks update-kubeconfig --region {region} --name {deployment_id}")
-            click.echo(f"🔍 View in K9s: k9s --context {deployment_id}")
-            click.echo()
-            click.echo("💡 Tip: Use 'platform stop {deployment_id}' to scale down when not in use")
-
-        except Exception as e:
-            # Update metadata with error
-            metadata["status"] = "failed"
-            metadata["error"] = str(e)
-
-            save_deployment_metadata(deployment_id, metadata)
-
-            click.echo("❌ Cluster creation failed")
-            click.echo("💡 Check AWS CloudFormation console for detailed error information")
-            raise
-    else:
-        click.echo("❌ Cluster creation cancelled")
-
-    # Handle eksctl configuration
-    if eksctl_config:
-        # Use provided eksctl config
-        click.echo(f"📋 Using provided eksctl config: {eksctl_config}")
-        import shutil
-        shutil.copy(eksctl_config, deployment_dir / "cluster.yaml")
-        eksctl_config_path = "cluster.yaml"
-    else:
-        # Generate eksctl config
-        click.echo("🔍 Fetching available subnets...")
-        subnets = get_vpc_subnets(region)
-
-        if not subnets:
-            click.echo("❌ No subnets found in region")
-            raise click.Abort()
-
-        # Filter private subnets
-        private_subnets = [s for s in subnets if s['type'] == 'private']
-
-        if not private_subnets:
-            click.echo("❌ No private subnets found")
-            raise click.Abort()
-
-        if auto_select_subnets:
-            # Auto-select private subnets from the same VPC with different AZs
-            vpcs = {}
-            for subnet in private_subnets:
-                vpc_id = subnet['vpc_id']
-                if vpc_id not in vpcs:
-                    vpcs[vpc_id] = []
-                vpcs[vpc_id].append(subnet)
-
-            # Find the VPC with the most subnets
-            best_vpc = max(vpcs.keys(), key=lambda vpc: len(vpcs[vpc]))
-            vpc_subnets = vpcs[best_vpc]
-
-            # Select subnets from different AZs within the same VPC
-            selected_subnets = []
-            used_azs = set()
-            for subnet in vpc_subnets:
-                if subnet['az'] not in used_azs and len(selected_subnets) < 3:
-                    selected_subnets.append(subnet)
-                    used_azs.add(subnet['az'])
-
-            if len(selected_subnets) < 2:
-                click.echo(f"❌ Need at least 2 subnets in different AZs. Found {len(selected_subnets)} in VPC {best_vpc}")
-                raise click.Abort()
-
-            click.echo(f"✅ Auto-selected {len(selected_subnets)} subnets from VPC {best_vpc}")
-            for subnet in selected_subnets:
-                click.echo(f"   - {subnet['name']} ({subnet['id']}) in {subnet['az']}")
-
-        else:
-            # Interactive subnet selection - group by VPC for better UX
-            vpcs = {}
-            for subnet in private_subnets:
-                vpc_id = subnet['vpc_id']
-                if vpc_id not in vpcs:
-                    vpcs[vpc_id] = []
-                vpcs[vpc_id].append(subnet)
-
-            # Show subnets grouped by VPC
-            click.echo("\n📋 Available private subnets grouped by VPC:")
-            subnet_choices = []
-            choice_index = 1
-
-            for vpc_id, vpc_subnets in vpcs.items():
-                click.echo(f"\n  VPC: {vpc_id}")
-                for subnet in vpc_subnets:
-                    click.echo(f"    {choice_index}. {subnet['name']} ({subnet['id']}) - {subnet['az']} - {subnet['cidr']}")
-                    subnet_choices.append(subnet)
-                    choice_index += 1
-
-            click.echo("\n⚠️  Important: All selected subnets must be from the same VPC!")
-
-            selected_indices = click.prompt(
-                "Select subnets (comma-separated numbers, e.g., 1,2,3)",
-                type=str
-            )
-
-            try:
-                indices = [int(x.strip()) - 1 for x in selected_indices.split(',')]
-                selected_subnets = [subnet_choices[i] for i in indices]
-
-                # Validate all subnets are from the same VPC
-                vpc_ids = set(subnet['vpc_id'] for subnet in selected_subnets)
-                if len(vpc_ids) > 1:
-                    click.echo(f"❌ Selected subnets are from different VPCs: {vpc_ids}")
-                    click.echo("Please select subnets from the same VPC only.")
-                    raise click.Abort()
-
-                # Validate we have subnets in different AZs
-                azs = set(subnet['az'] for subnet in selected_subnets)
-                if len(azs) < 2:
-                    click.echo("❌ Need subnets in at least 2 different availability zones")
-                    raise click.Abort()
-
-            except (ValueError, IndexError):
-                click.echo("❌ Invalid subnet selection")
-                raise click.Abort()
-
-        click.echo(f"✅ Selected {len(selected_subnets)} subnets")
-
-        # Generate eksctl config
-        eksctl_config_data = generate_eksctl_config(
-            deployment_id, owner, region, selected_subnets, preset, expires_at, config
-        )
-
-        # Save eksctl config
-        eksctl_config_path = deployment_dir / "cluster.yaml"
-        with open(eksctl_config_path, 'w') as f:
-            yaml.dump(eksctl_config_data, f, default_flow_style=False)
-
-        eksctl_config_path = "cluster.yaml"
-
-        click.echo(f"📝 Generated eksctl config: {deployment_dir / 'cluster.yaml'}")
-
-    # Create metadata
-    metadata = create_deployment_metadata(
-        deployment_id, name, owner, purpose, expires_at, "eks-cluster", region
-    )
-    metadata["eksctl_config"] = eksctl_config_path
-    metadata["preset"] = preset
-    metadata["is_running"] = False  # Track if cluster is running or stopped
-
-    # Save metadata
-    save_deployment_metadata(deployment_id, metadata)
-
-    # Show config preview
-    click.echo("\n📋 Cluster configuration preview:")
-    with open(deployment_dir / eksctl_config_path, 'r') as f:
-        config_preview = f.read()
-        # Show first 20 lines
-        lines = config_preview.split('\n')[:20]
-        click.echo('\n'.join(lines))
-        if len(config_preview.split('\n')) > 20:
-            click.echo("...")
-
-    if confirm_action("\nProceed with cluster creation?"):
-        click.echo("🚀 Creating EKS cluster (this may take 10-15 minutes)...")
-
-        try:
-            output = run_eksctl_command("create", deployment_dir, eksctl_config_path)
-            click.echo(output)
-
-            # Update metadata
-            metadata["status"] = "running"
-            metadata["is_running"] = True
-            metadata["created_date"] = datetime.now().isoformat()
-
-            save_deployment_metadata(deployment_id, metadata)
-
-            click.echo("✅ EKS cluster created successfully!")
-            click.echo(f"📁 Deployment directory: {deployment_dir}")
-            click.echo(f"🎯 Update kubeconfig: aws eks update-kubeconfig --region {region} --name {deployment_id}")
-            click.echo(f"🔍 View in K9s: k9s --context {deployment_id}")
-            click.echo()
-            click.echo("💡 Tip: Use 'platform stop {deployment_id}' to scale down when not in use")
-
-        except Exception as e:
-            # Update metadata with error
-            metadata["status"] = "failed"
-            metadata["error"] = str(e)
-
-            save_deployment_metadata(deployment_id, metadata)
-
-            click.echo("❌ Cluster creation failed")
-            raise
-    else:
-        click.echo("❌ Cluster creation cancelled")
-
-
-@create.command("database")
-@click.option("--name", required=True, help="Database instance name")
-@click.option("--deployment-id", required=True, help="EKS deployment ID to attach to")
-@click.option("--engine", required=True,
-              type=click.Choice(['postgres', 'mysql', 'oracle']),
-              help="Database engine")
-@click.option("--username", required=True, help="Master username")
-@click.option("--password", required=True, help="Master password")
-@click.option("--db-name", help="Database name (defaults to engine default)")
-@click.option("--instance-type", help="RDS instance type (defaults to engine default)")
-@click.option("--storage", default=20, type=int, help="Allocated storage in GB")
-@click.option("--backup-retention", default=7, type=int, help="Backup retention in days")
-def create_database(name, deployment_id, engine, username, password, db_name,
-                   instance_type, storage, backup_retention):
-    """Create a database for an EKS deployment"""
-
-    # Check if setup is complete
-    config = check_setup_required()
-
-    # Validate AWS credentials
-    validate_aws_credentials()
-
-    # Validate engine requirements
-    if not instance_type:
-        instance_type = DATABASE_ENGINES[engine]["default_instance"]
-
-    validate_engine_requirements(engine, instance_type, storage)
-
-    # Check if the deployment exists
-    metadata = load_deployment_metadata(deployment_id)
-    if not metadata:
-        click.echo(f"❌ Deployment not found: {deployment_id}")
-        raise click.Abort()
-
-    # Ensure this is an EKS deployment
-    if metadata["resource_type"] != "eks-cluster":
-        click.echo("❌ This command only supports EKS cluster deployments")
-        raise click.Abort()
-
-    region = metadata["region"]
-
-    # Get deployment VPC and subnet information
-    click.echo(f"🔍 Getting VPC information for deployment: {deployment_id}")
-
-    try:
-        vpc_id = get_cluster_vpc_info(deployment_id, region)
-        click.echo(f"📋 Found VPC: {vpc_id}")
-
-        # Get private subnets
-        subnets = get_vpc_subnets(region)
-        private_subnets = [s for s in subnets if s['type'] == 'private' and s['vpc_id'] == vpc_id]
-
-        if not private_subnets or len(private_subnets) < 2:
-            click.echo("❌ Need at least 2 private subnets for RDS")
-            raise click.Abort()
-
-        # Show selected subnets
-        click.echo("📋 Selected subnets for RDS:")
-        for subnet in private_subnets[:2]:
-            click.echo(f"   - {subnet['name']} ({subnet['id']}) in {subnet['az']}")
-
-        # Create the RDS instance
-        db_instance_name = f"{deployment_id}-{sanitize_name(name)}"
-
-        # Check if database instance name exceeds 63 characters (RDS limit)
-        if len(db_instance_name) > 63:
-            db_instance_name = f"{deployment_id[:30]}-{sanitize_name(name, 28)}"
-            click.echo(f"⚠️  Database name truncated to: {db_instance_name}")
-
-        # Confirm creation
-        click.echo(f"\n🚀 Creating {engine.upper()} database: {db_instance_name}")
-        click.echo(f"   VPC: {vpc_id}")
-        click.echo(f"   Type: {instance_type}")
-        click.echo(f"   Storage: {storage} GB")
-        click.echo(f"   Username: {username}")
-        if db_name:
-            click.echo(f"   Database: {db_name}")
-
-        if not confirm_action("\nProceed with database creation?"):
-            click.echo("❌ Database creation cancelled")
-            return
-
-        # Create the RDS instance
-        db_info = create_rds_instance(
-            name=db_instance_name,
-            engine=engine,
-            vpc_id=vpc_id,
-            subnets=private_subnets[:2],  # Use first 2 private subnets
-            region=region,
-            username=username,
-            password=password,
-            db_name=db_name,
-            instance_type=instance_type,
-            allocated_storage=storage,
-            backup_retention=backup_retention,
-            deployment_id=deployment_id
-        )
-
-        # Save RDS metadata
-        deployment_dir = DEPLOYMENTS_DIR / deployment_id
-        rds_metadata_path = deployment_dir / "rds_metadata.json"
-        with open(rds_metadata_path, 'w') as f:
-            # Don't store the password in the metadata
-            db_info_safe = dict(db_info)
-            db_info_safe["password"] = "******"  # Don't store actual password
-            json.dump(db_info_safe, f, indent=2)
-
-        # Update deployment metadata
-        metadata["has_rds"] = True
-        metadata["rds_instance_id"] = db_instance_name
-        metadata["rds_engine"] = engine
-
-        save_deployment_metadata(deployment_id, metadata)
-
-        click.echo(f"\n✅ {engine.upper()} database creation initiated: {db_instance_name}")
-        click.echo("📊 Database creation will take 5-15 minutes.")
-        click.echo("💡 Use 'platform status database' to check progress")
-
-    except Exception as e:
-        click.echo(f"❌ Error creating database: {str(e)}")
-        raise click.Abort()
-
-
-@create.command("s3-bucket")
-@click.option('--name', required=True, help="The name of the S3 bucket to create")
-@click.option('--region', help="The AWS region for the S3 bucket. Overrides config default")
-@click.option('--owner-email', help="The owner's email for tags. Defaults to config user email")
-@click.option('--preset', help="The deployment preset for the 'info' tag. Defaults to config environment")
-@click.option('--expires-days', type=int, default=90, help="Number of days until bucket expiration tag")
-def create_s3_bucket_command(name, region, owner_email, preset, expires_days):
-    """Create or locate an S3 bucket with platform management tags"""
-
-    # Check if setup is complete
-    config = check_setup_required()
-
-    # Validate AWS credentials
-    validate_aws_credentials()
-
-    # Validate bucket name
-    is_valid, error_msg = validate_bucket_name(name)
-    if not is_valid:
-        click.echo(f"❌ Invalid bucket name: {error_msg}")
-        raise click.Abort()
-
-    # Determine region
-    actual_region = region or config.config.get("default_region")
-    if not actual_region:
-        click.echo("❌ AWS region not provided via --region or found in config")
-        raise click.Abort()
-
-    # Determine owner_email
-    actual_owner_email = owner_email or config.config.get("user_profile", {}).get("email")
-    if not actual_owner_email:
-        click.echo("❌ Owner email not provided via --owner-email or found in config")
-        raise click.Abort()
-
-    # Determine preset
-    actual_preset = preset or config.config.get("default_tags", {}).get("environment", "development")
-
-    click.echo(f"\n🪣 Managing S3 bucket '{name}' in region '{actual_region}'")
-
-    # Construct expiration datetime
-    expires_in_str = f"{expires_days}d"
-    try:
-        expires_at = parse_expiration(expires_in_str)
-    except click.BadParameter as e:
-        click.echo(f"❌ Invalid expires-days value: {e}")
-        raise click.Abort()
-
-    # Check if bucket exists
-    located_bucket = locate_s3_bucket(name, actual_region)
-
-    if located_bucket:
-        click.echo(f"✅ Bucket '{name}' already exists")
-
-        # Get bucket info
-        bucket_info = get_bucket_info(name, actual_region)
-        if bucket_info:
-            click.echo(f"📊 Bucket info:")
-            click.echo(f"   Region: {bucket_info['region']}")
-            click.echo(f"   Size: {bucket_info['size_gb']} GB")
-            click.echo(f"   Owner: {bucket_info['owner']}")
-            click.echo(f"   Platform Managed: {bucket_info['platform_managed']}")
-        return
-
-    click.echo(f"📋 Bucket '{name}' not found. Creating it...")
-
-    # Create the bucket
-    if create_s3_bucket(name, actual_region, config, actual_owner_email, actual_preset, expires_at):
-        click.echo(f"✅ Bucket '{name}' successfully created and tagged")
-    else:
-        click.echo(f"❌ Failed to create bucket '{name}'")
-        raise click.Abort()
-
-
-@cli.command("start")
-@click.argument("deployment_id")
+@local.command("destroy")
+@click.option("--name", required=True, help="Local cluster name to destroy")
 @click.option("--force", is_flag=True, help="Skip confirmation")
-def start_deployment(deployment_id, force):
-    """Start/scale up a deployment"""
+def destroy_local_cluster(name, force):
+    """Destroy a local Kind cluster"""
+    if not force:
+        click.confirm(f"Destroy local cluster '{name}'?", abort=True)
 
-    metadata = load_deployment_metadata(deployment_id)
-    if not metadata:
-        click.echo(f"❌ Deployment not found: {deployment_id}")
-        raise click.Abort()
+    destroy_kind_cluster(name)
+    click.echo(f"✅ Local cluster '{name}' destroyed")
 
-    if metadata["status"] != "running":
-        click.echo(f"❌ Cannot start deployment with status: {metadata['status']}")
-        raise click.Abort()
+@local.command("list")
+def list_local_clusters_cmd():
+    """List local Kind clusters"""
+    clusters = list_local_clusters()
 
-    if metadata.get("is_running", True):
-        click.echo(f"✅ Deployment {deployment_id} is already running")
+    if not clusters:
+        click.echo("No local clusters found")
         return
 
-    click.echo(f"🚀 Starting deployment: {deployment_id}")
-    click.echo(f"   Owner: {metadata['owner']}")
-    click.echo(f"   Type: {metadata['resource_type']}")
-    click.echo(f"   Region: {metadata['region']}")
-
-    if not confirm_action("Start this deployment?", force):
-        click.echo("❌ Start cancelled")
-        return
-
-    try:
-        if metadata["resource_type"] == "eks-cluster":
-            click.echo("🔄 Scaling up EKS node groups...")
-            results = scale_eks_nodegroups(deployment_id, metadata["region"], scale_to=1)
-
-            for result in results:
-                click.echo(f"   {result}")
-
-            # Update metadata
-            metadata["is_running"] = True
-            metadata["last_started"] = datetime.now().isoformat()
-
-            save_deployment_metadata(deployment_id, metadata)
-
-            click.echo("✅ Deployment started successfully!")
-            click.echo("⏳ Node groups are scaling up (may take 2-3 minutes)")
-            click.echo(f"🎯 Update kubeconfig: platform update-kubeconfig {deployment_id}")
-
-        else:
-            click.echo(f"❌ Start operation not supported for resource type: {metadata['resource_type']}")
-
-    except Exception as e:
-        click.echo(f"❌ Failed to start deployment: {e}")
-        raise click.Abort()
-
-
-@cli.command("stop")
-@click.argument("deployment_id")
-@click.option("--force", is_flag=True, help="Skip confirmation")
-def stop_deployment(deployment_id, force):
-    """Stop/scale down a deployment to save costs"""
-
-    metadata = load_deployment_metadata(deployment_id)
-    if not metadata:
-        click.echo(f"❌ Deployment not found: {deployment_id}")
-        raise click.Abort()
-
-    if metadata["status"] != "running":
-        click.echo(f"❌ Cannot stop deployment with status: {metadata['status']}")
-        raise click.Abort()
-
-    if not metadata.get("is_running", True):
-        click.echo(f"✅ Deployment {deployment_id} is already stopped")
-        return
-
-    click.echo(f"⏸️  Stopping deployment: {deployment_id}")
-    click.echo(f"   Owner: {metadata['owner']}")
-    click.echo(f"   Type: {metadata['resource_type']}")
-    click.echo(f"   Region: {metadata['region']}")
-    click.echo()
-    click.echo("This will scale node groups to 0 to save costs.")
-    click.echo("The cluster control plane will remain active.")
-    click.echo("Use 'platform start' to scale back up.")
-
-    if not confirm_action("Stop this deployment?", force):
-        click.echo("❌ Stop cancelled")
-        return
-
-    try:
-        if metadata["resource_type"] == "eks-cluster":
-            click.echo("🔄 Scaling down EKS node groups to 0...")
-            results = scale_eks_nodegroups(deployment_id, metadata["region"], scale_to=0)
-
-            for result in results:
-                click.echo(f"   {result}")
-
-            # Update metadata
-            metadata["is_running"] = False
-            metadata["last_stopped"] = datetime.now().isoformat()
-
-            save_deployment_metadata(deployment_id, metadata)
-
-            click.echo("✅ Deployment stopped successfully!")
-            click.echo("💰 Node costs reduced to $0 while stopped")
-            click.echo(f"🚀 Restart with: platform start {deployment_id}")
-
-        else:
-            click.echo(f"❌ Stop operation not supported for resource type: {metadata['resource_type']}")
-
-    except Exception as e:
-        click.echo(f"❌ Failed to stop deployment: {e}")
-        raise click.Abort()
-
-
-@cli.command("list")
-@click.option("--owner", help="Filter by owner")
-@click.option("--expiring-soon", is_flag=True, help="Show deployments expiring in 24 hours")
-@click.option("--status", help="Filter by status (creating, running, failed)")
-@click.option("--running", is_flag=True, help="Show only running (scaled up) deployments")
-@click.option("--stopped", is_flag=True, help="Show only stopped (scaled down) deployments")
-@click.option("--type", "resource_type", help="Filter by resource type (eks-cluster, s3-bucket)")
-def list_deployments_command(owner, expiring_soon, status, running, stopped, resource_type):
-    """List active deployments"""
-
-    deployments = list_deployments(
-        owner=owner,
-        status=status,
-        resource_type=resource_type,
-        expiring_soon=expiring_soon,
-        running=running,
-        stopped=stopped
-    )
-
-    print_deployments_table(deployments)
-
-
-@cli.command("destroy")
-@click.argument("deployment_id")
-@click.option("--force", is_flag=True, help="Skip confirmation")
-def destroy_deployment(deployment_id, force):
-    """Destroy a deployment"""
-
-    metadata = load_deployment_metadata(deployment_id)
-    if not metadata:
-        click.echo(f"❌ Deployment not found: {deployment_id}")
-        raise click.Abort()
-
-    click.echo(f"🗑️  Destroying deployment: {deployment_id}")
-    click.echo(f"   Owner: {metadata['owner']}")
-    click.echo(f"   Created: {metadata['created_at']}")
-    click.echo(f"   Type: {metadata['resource_type']}")
-
-    if not confirm_action("Are you sure you want to destroy this deployment?", force):
-        click.echo("❌ Destruction cancelled")
-        return
-
-    # Handle different resource types
-    try:
-        if metadata["resource_type"] == "eks-cluster":
-            # Run eksctl delete
-            deployment_dir = DEPLOYMENTS_DIR / deployment_id
-            eksctl_config = metadata.get("eksctl_config", "cluster.yaml")
-            click.echo("🏗️  Destroying EKS cluster (this may take 10-15 minutes)...")
-
-            run_eksctl_command("delete", deployment_dir, eksctl_config)
-
-            # Also delete RDS if it exists
-            if metadata.get("has_rds"):
-                rds_instance_id = metadata.get("rds_instance_id")
-                if rds_instance_id:
-                    click.echo(f"🗑️ Also destroying RDS instance: {rds_instance_id}")
-                    delete_rds_instance(rds_instance_id, metadata["region"])
-
-        # Update metadata
-        metadata["status"] = "destroyed"
-        metadata["destroyed_at"] = datetime.now().isoformat()
-
-        save_deployment_metadata(deployment_id, metadata)
-
-        click.echo(f"✅ Deployment {deployment_id} destroyed successfully")
-
-    except Exception as e:
-        click.echo(f"❌ Destruction failed: {e}")
-        # Don't update metadata on failure so user can retry
-        raise
-
-
-@cli.command("extend")
-@click.argument("deployment_id")
-@click.option("--expires-in", required=True, help="New expiration time (e.g., '3d', '1w')")
-def extend_deployment(deployment_id, expires_in):
-    """Extend deployment expiration"""
-
-    metadata = load_deployment_metadata(deployment_id)
-    if not metadata:
-        click.echo(f"❌ Deployment not found: {deployment_id}")
-        raise click.Abort()
-
-    # Parse new expiration
-    new_expires_at = parse_expiration(expires_in)
-
-    old_expires = metadata["expires_at"]
-    metadata["expires_at"] = new_expires_at.isoformat()
-    metadata["extended_at"] = datetime.now().isoformat()
-
-    # Update tags
-    metadata["tags"]["AutoDestroy"] = new_expires_at.isoformat()
-
-    save_deployment_metadata(deployment_id, metadata)
-
-    click.echo(f"✅ Extended {deployment_id}")
-    click.echo(f"   Old expiration: {old_expires}")
-    click.echo(f"   New expiration: {new_expires_at.isoformat()}")
-
-
-@cli.command("config")
-@click.option("--set-region", help="Set default AWS region")
-@click.option("--set-expiration", help="Set default expiration time")
-@click.option("--set-key-name", help="Set default SSH key name")
-@click.option("--set-name", help="Set your name")
-@click.option("--set-email", help="Set your email")
-@click.option("--set-org", help="Set your organization")
-@click.option("--set-team", help="Set your team")
-@click.option("--set-environment", help="Set default environment")
-@click.option("--reset", is_flag=True, help="Reset configuration and run setup again")
-def configure(set_region, set_expiration, set_key_name, set_name, set_email,
-              set_org, set_team, set_environment, reset):
-    """Configure platform settings"""
-
-    config = PlatformConfig()
-
-    if reset:
-        if confirm_action("Are you sure you want to reset all configuration?"):
-            config.config = {
-                "default_region": "us-east-1",
-                "default_expiration": "7d",
-                "aws_account_id": config.config.get("aws_account_id"),  # Keep AWS account ID
-                "default_key_name": "en-field-key",
-                "user_profile": {
-                    "name": None,
-                    "email": None,
-                    "org": None,
-                    "team": None
-                },
-                "default_tags": {
-                    "cloud": "aws",
-                    "environment": "demo"
-                },
-                "setup_complete": False
-            }
-            config.save_config()
-            click.echo("✅ Configuration reset. Run 'platform setup' to reconfigure.")
-        return
-
-    # Update individual settings
-    if set_region:
-        config.config["default_region"] = set_region
-        click.echo(f"✅ Default region set to: {set_region}")
-
-    if set_expiration:
-        # Validate expiration format
-        try:
-            parse_expiration(set_expiration)
-            config.config["default_expiration"] = set_expiration
-            click.echo(f"✅ Default expiration set to: {set_expiration}")
-        except click.BadParameter as e:
-            click.echo(f"❌ {e}")
-            raise click.Abort()
-
-    if set_key_name:
-        config.config["default_key_name"] = set_key_name
-        click.echo(f"✅ Default SSH key name set to: {set_key_name}")
-
-    if set_name:
-        config.config.setdefault("user_profile", {})["name"] = set_name
-        click.echo(f"✅ Name set to: {set_name}")
-
-    if set_email:
-        config.config.setdefault("user_profile", {})["email"] = set_email
-        click.echo(f"✅ Email set to: {set_email}")
-
-    if set_org:
-        config.config.setdefault("user_profile", {})["org"] = set_org
-        config.config.setdefault("default_tags", {})["org"] = set_org
-        click.echo(f"✅ Organization set to: {set_org}")
-
-    if set_team:
-        config.config.setdefault("user_profile", {})["team"] = set_team
-        config.config.setdefault("default_tags", {})["team"] = set_team
-        click.echo(f"✅ Team set to: {set_team}")
-
-    if set_environment:
-        config.config.setdefault("default_tags", {})["environment"] = set_environment
-        click.echo(f"✅ Environment set to: {set_environment}")
-
-    # Save changes
-    if any([set_region, set_expiration, set_key_name, set_name, set_email,
-            set_org, set_team, set_environment]):
-        config.save_config()
-    else:
-        # Show current config
-        click.echo("📋 Current Configuration:")
-        click.echo()
-
-        # Setup status
-        setup_complete = config.config.get("setup_complete", False)
-        click.echo(f"Setup Complete: {'✅ Yes' if setup_complete else '❌ No (run platform setup)'}")
-        click.echo()
-
-        # User Profile
-        user_profile = config.config.get("user_profile", {})
-        click.echo("👤 User Profile:")
-        click.echo(f"   Name: {user_profile.get('name', 'Not set')}")
-        click.echo(f"   Email: {user_profile.get('email', 'Not set')}")
-        click.echo(f"   Organization: {user_profile.get('org', 'Not set')}")
-        click.echo(f"   Team: {user_profile.get('team', 'Not set')}")
-        click.echo()
-
-        # Default Settings
-        click.echo("⚙️  Default Settings:")
-        click.echo(f"   Region: {config.config.get('default_region', 'Not set')}")
-        click.echo(f"   Expiration: {config.config.get('default_expiration', 'Not set')}")
-        click.echo(f"   SSH Key: {config.config.get('default_key_name', 'Not set')}")
-        click.echo()
-
-        # Default Tags
-        default_tags = config.config.get("default_tags", {})
-        click.echo("🏷️  Default Tags:")
-        for key, value in default_tags.items():
-            click.echo(f"   {key}: {value}")
-        click.echo()
-
-        # AWS Info
-        click.echo("☁️  AWS Info:")
-        click.echo(f"   Account ID: {config.config.get('aws_account_id', 'Not detected')}")
-
-        if not setup_complete:
-            click.echo()
-            click.echo("💡 Run 'platform setup' to complete initial configuration")
-
-
-@cli.command("validate-name")
-@click.argument("cluster_name")
-@click.option("--owner", help="Owner email (defaults to configured email)")
-def validate_name_command(cluster_name, owner):
-    """Validate a cluster name for AWS CloudFormation compatibility"""
-
-    config = check_setup_required()
-
-    if not owner:
-        owner = config.config.get("user_profile", {}).get("email", "user@example.com")
-
-    errors, warnings, deployment_id = validate_cluster_name(cluster_name, owner)
-
-    click.echo(f"🔍 Validating cluster name: '{cluster_name}'")
-    click.echo(f"📋 Generated deployment ID: '{deployment_id}' ({len(deployment_id)} chars)")
-    click.echo()
-
-    if errors:
-        click.echo("❌ Validation Errors:")
-        for error in errors:
-            click.echo(f"   {error}")
-
-        suggested = suggest_shorter_name(cluster_name)
-        if suggested != cluster_name:
-            click.echo(f"\n💡 Suggested name: '{suggested}'")
-
-            # Test the suggested name
-            _, _, suggested_id = validate_cluster_name(suggested, owner)
-            click.echo(f"   Suggested deployment ID: '{suggested_id}' ({len(suggested_id)} chars)")
-
-        print_cluster_name_guidance()
-    elif warnings:
-        click.echo("⚠️  Validation Warnings:")
-        for warning in warnings:
-            click.echo(f"   {warning}")
-        click.echo()
-        click.echo("✅ Name is usable but consider shortening for optimal compatibility")
-    else:
-        click.echo("✅ Cluster name is valid and optimal!")
-        click.echo("   All AWS features will be available")
-
-    # Show feature availability
-    click.echo(f"\n📊 Feature Availability for '{deployment_id}':")
-    if len(deployment_id) <= 30:
-        click.echo("   ✅ All addon policies (externalDNS, certManager, autoScaler)")
-        click.echo("   ✅ Full CloudFormation compatibility")
-    elif len(deployment_id) <= 40:
-        click.echo("   ⚠️  Basic addon policies only (autoScaler)")
-        click.echo("   ⚠️  externalDNS and certManager disabled")
-        click.echo("   ✅ CloudFormation compatible")
-    else:
-        click.echo("   ❌ May cause CloudFormation failures")
-        click.echo("   ❌ All addon policies disabled")
-
-
-@cli.command("suggest-name")
-@click.argument("long_name")
-@click.option("--max-length", default=15, help="Maximum length for suggestion")
-def suggest_name_command(long_name, max_length):
-    """Suggest a shorter cluster name"""
-
-    suggested = suggest_shorter_name(long_name, max_length)
-
-    click.echo(f"Original name: '{long_name}' ({len(long_name)} chars)")
-    click.echo(f"Suggested name: '{suggested}' ({len(suggested)} chars)")
-
-    if suggested != long_name:
-        click.echo(f"💡 Savings: {len(long_name) - len(suggested)} characters")
-
-        # Show what the deployment ID would look like
-        config = check_setup_required()
-        owner = config.config.get("user_profile", {}).get("email", "user@example.com")
-
-        original_deployment_id = generate_deployment_id(long_name, owner)
-        suggested_deployment_id = generate_deployment_id(suggested, owner)
-
-        click.echo(f"\nDeployment ID comparison:")
-        click.echo(f"   Original: '{original_deployment_id}' ({len(original_deployment_id)} chars)")
-        click.echo(f"   Suggested: '{suggested_deployment_id}' ({len(suggested_deployment_id)} chars)")
-    else:
-        click.echo("✅ Name is already optimal length!")
-@click.option("--set-region", help="Set default AWS region")
-@click.option("--set-expiration", help="Set default expiration time")
-@click.option("--set-key-name", help="Set default SSH key name")
-@click.option("--set-name", help="Set your name")
-@click.option("--set-email", help="Set your email")
-@click.option("--set-org", help="Set your organization")
-@click.option("--set-team", help="Set your team")
-@click.option("--set-environment", help="Set default environment")
-@click.option("--reset", is_flag=True, help="Reset configuration and run setup again")
-def configure(set_region, set_expiration, set_key_name, set_name, set_email,
-              set_org, set_team, set_environment, reset):
-    """Configure platform settings"""
-
-    config = PlatformConfig()
-
-    if reset:
-        if confirm_action("Are you sure you want to reset all configuration?"):
-            config.config = {
-                "default_region": "us-east-1",
-                "default_expiration": "7d",
-                "aws_account_id": config.config.get("aws_account_id"),  # Keep AWS account ID
-                "default_key_name": "en-field-key",
-                "user_profile": {
-                    "name": None,
-                    "email": None,
-                    "org": None,
-                    "team": None
-                },
-                "default_tags": {
-                    "cloud": "aws",
-                    "environment": "demo"
-                },
-                "setup_complete": False
-            }
-            config.save_config()
-            click.echo("✅ Configuration reset. Run 'platform setup' to reconfigure.")
-        return
-
-    # Update individual settings
-    if set_region:
-        config.config["default_region"] = set_region
-        click.echo(f"✅ Default region set to: {set_region}")
-
-    if set_expiration:
-        # Validate expiration format
-        try:
-            parse_expiration(set_expiration)
-            config.config["default_expiration"] = set_expiration
-            click.echo(f"✅ Default expiration set to: {set_expiration}")
-        except click.BadParameter as e:
-            click.echo(f"❌ {e}")
-            raise click.Abort()
-
-    if set_key_name:
-        config.config["default_key_name"] = set_key_name
-        click.echo(f"✅ Default SSH key name set to: {set_key_name}")
-
-    if set_name:
-        config.config.setdefault("user_profile", {})["name"] = set_name
-        click.echo(f"✅ Name set to: {set_name}")
-
-    if set_email:
-        config.config.setdefault("user_profile", {})["email"] = set_email
-        click.echo(f"✅ Email set to: {set_email}")
-
-    if set_org:
-        config.config.setdefault("user_profile", {})["org"] = set_org
-        config.config.setdefault("default_tags", {})["org"] = set_org
-        click.echo(f"✅ Organization set to: {set_org}")
-
-    if set_team:
-        config.config.setdefault("user_profile", {})["team"] = set_team
-        config.config.setdefault("default_tags", {})["team"] = set_team
-        click.echo(f"✅ Team set to: {set_team}")
-
-    if set_environment:
-        config.config.setdefault("default_tags", {})["environment"] = set_environment
-        click.echo(f"✅ Environment set to: {set_environment}")
-
-    # Save changes
-    if any([set_region, set_expiration, set_key_name, set_name, set_email,
-            set_org, set_team, set_environment]):
-        config.save_config()
-    else:
-        # Show current config
-        click.echo("📋 Current Configuration:")
-        click.echo()
-
-        # Setup status
-        setup_complete = config.config.get("setup_complete", False)
-        click.echo(f"Setup Complete: {'✅ Yes' if setup_complete else '❌ No (run platform setup)'}")
-        click.echo()
-
-        # User Profile
-        user_profile = config.config.get("user_profile", {})
-        click.echo("👤 User Profile:")
-        click.echo(f"   Name: {user_profile.get('name', 'Not set')}")
-        click.echo(f"   Email: {user_profile.get('email', 'Not set')}")
-        click.echo(f"   Organization: {user_profile.get('org', 'Not set')}")
-        click.echo(f"   Team: {user_profile.get('team', 'Not set')}")
-        click.echo()
-
-        # Default Settings
-        click.echo("⚙️  Default Settings:")
-        click.echo(f"   Region: {config.config.get('default_region', 'Not set')}")
-        click.echo(f"   Expiration: {config.config.get('default_expiration', 'Not set')}")
-        click.echo(f"   SSH Key: {config.config.get('default_key_name', 'Not set')}")
-        click.echo()
-
-        # Default Tags
-        default_tags = config.config.get("default_tags", {})
-        click.echo("🏷️  Default Tags:")
-        for key, value in default_tags.items():
-            click.echo(f"   {key}: {value}")
-        click.echo()
-
-        # AWS Info
-        click.echo("☁️  AWS Info:")
-        click.echo(f"   Account ID: {config.config.get('aws_account_id', 'Not detected')}")
-
-        if not setup_complete:
-            click.echo()
-            click.echo("💡 Run 'platform setup' to complete initial configuration")
-
-
-@cli.command("update-kubeconfig")
-@click.argument("deployment_id")
-def update_kubeconfig_command(deployment_id):
-    """Update kubeconfig for a deployment"""
-
-    metadata = load_deployment_metadata(deployment_id)
-    if not metadata:
-        click.echo(f"❌ Deployment not found: {deployment_id}")
-        raise click.Abort()
-
-    region = metadata["region"]
-
-    success, message = update_kubeconfig(deployment_id, region)
-    if success:
-        click.echo(f"✅ {message}")
-        click.echo(f"🎯 Access with K9s: k9s --context {deployment_id}")
-    else:
-        click.echo(f"❌ {message}")
-        raise click.Abort()
-
+    click.echo("📋 Local Clusters:")
+    for cluster in clusters:
+        status = "🟢 Running" if cluster['running'] else "🔴 Stopped"
+        click.echo(f"  {status} {cluster['name']} ({cluster['preset']})")
+
+# ============================================================================
+# CONNECTIVITY MANAGEMENT
+# ============================================================================
 
 @cli.group()
-def status():
-    """Check status of deployments and resources"""
+def connect():
+    """Manage connections to shared cloud data sources"""
     pass
 
+@connect.command("enable")
+@click.argument("data_source")
+@click.option("--cluster", help="Target local cluster (defaults to current context)")
+def enable_data_source_cmd(data_source, cluster):
+    """Enable access to a shared data source"""
+    click.echo(f"🔗 Enabling connection to {data_source}...")
 
-@status.command("database")
-@click.argument("deployment_id")
-def database_status(deployment_id):
-    """Check database status for a deployment"""
+    connection_info = enable_data_source(data_source, cluster)
 
-    metadata = load_deployment_metadata(deployment_id)
-    if not metadata:
-        click.echo(f"❌ Deployment not found: {deployment_id}")
-        raise click.Abort()
+    click.echo(f"✅ Connected to {data_source}")
+    click.echo(f"📋 Connection details: platform connect info {data_source}")
 
-    if not metadata.get("has_rds"):
-        click.echo(f"❌ No database found for deployment: {deployment_id}")
-        return
+@connect.command("disable")
+@click.argument("data_source")
+@click.option("--cluster", help="Target local cluster")
+def disable_data_source_cmd(data_source, cluster):
+    """Disable access to a shared data source"""
+    click.echo(f"🔌 Disabling connection to {data_source}...")
 
-    rds_instance_id = metadata.get("rds_instance_id")
-    region = metadata["region"]
+    disable_data_source(data_source, cluster)
 
-    click.echo(f"📊 Database status for {deployment_id}:")
+    click.echo(f"✅ Disconnected from {data_source}")
 
-    # Get RDS status
-    db_status = get_rds_instance_status(rds_instance_id, region)
-    if db_status:
-        click.echo(f"   Instance ID: {rds_instance_id}")
-        click.echo(f"   Status: {db_status['status']}")
-        click.echo(f"   Engine: {db_status['engine']} {db_status['engine_version']}")
-        click.echo(f"   Instance Type: {db_status['instance_class']}")
-        click.echo(f"   Storage: {db_status['storage']} GB")
+@connect.command("info")
+@click.argument("data_source")
+def get_connection_info_cmd(data_source):
+    """Get connection information for a data source"""
+    info = get_connection_info(data_source)
 
-        if db_status['endpoint']:
-            click.echo(f"   Endpoint: {db_status['endpoint']}:{db_status['port']}")
+    click.echo(f"📋 Connection Info for {data_source}:")
+    click.echo(f"   Status: {info['status']}")
+    click.echo(f"   Endpoint: {info['endpoint']}")
+    click.echo(f"   Port: {info['port']}")
+    click.echo(f"   SSH Tunnel: {info['tunnel_status']}")
 
-            # Load RDS metadata for connection info
-            deployment_dir = DEPLOYMENTS_DIR / deployment_id
-            rds_metadata_path = deployment_dir / "rds_metadata.json"
-            if rds_metadata_path.exists():
-                with open(rds_metadata_path, 'r') as f:
-                    rds_metadata = json.load(f)
+@connect.command("list")
+def list_available_sources_cmd():
+    """List available shared data sources"""
+    sources = list_available_sources()
 
-                click.echo("\n🔗 Connection Information:")
-                connection_strings = get_connection_string(rds_metadata, "YOUR_PASSWORD")
-                if isinstance(connection_strings, dict):
-                    for conn_type, conn_string in connection_strings.items():
-                        click.echo(f"   {conn_type.upper()}: {conn_string}")
-                else:
-                    click.echo(f"   {connection_strings}")
-        else:
-            click.echo("   Endpoint: Not yet available (database still initializing)")
-    else:
-        click.echo("   ❌ Could not retrieve database status")
+    click.echo("📊 Available Shared Data Sources:")
+    for category, category_sources in sources.items():
+        click.echo(f"\n  {category.upper()}:")
+        for source in category_sources:
+            status = "🟢 Connected" if source['connected'] else "⚪ Available"
+            click.echo(f"    {status} {source['name']} - {source['description']}")
 
+# ============================================================================
+# STARBURST MANAGEMENT
+# ============================================================================
 
 @cli.group()
-def s3():
-    """S3 bucket management commands"""
+def starburst():
+    """Manage Starburst Enterprise Platform deployments"""
     pass
 
-
-@s3.command("list")
-@click.option("--region", help="Filter by region")
-def list_s3_buckets(region):
-    """List platform-managed S3 buckets"""
-
-    check_setup_required()
-    validate_aws_credentials()
-
-    buckets = list_platform_buckets(region)
-
-    if not buckets:
-        click.echo("No platform-managed S3 buckets found")
-        return
-
-    click.echo("📋 Platform-managed S3 buckets:")
-    click.echo()
-
-    for bucket in buckets:
-        click.echo(f"🪣 {bucket['name']}")
-        click.echo(f"   Region: {bucket['region']}")
-        click.echo(f"   Size: {bucket['size_gb']} GB")
-        click.echo(f"   Owner: {bucket['owner']}")
-        click.echo(f"   Expires: {bucket['expires']}")
-        click.echo()
-
-
-@s3.command("delete")
-@click.argument("bucket_name")
-@click.option("--region", help="Bucket region")
-@click.option("--force", is_flag=True, help="Force delete (remove all contents)")
-def delete_s3_bucket_command(bucket_name, region, force):
-    """Delete a platform-managed S3 bucket"""
-
-    config = check_setup_required()
-    validate_aws_credentials()
-
-    if not region:
-        region = config.config.get("default_region")
-
-    if not region:
-        click.echo("❌ Region required. Specify --region or set default in config")
+@starburst.command("prepare")
+@click.option("--cluster", required=True, help="Target local cluster")
+@click.option("--preset", default="development", 
+              type=click.Choice(['development', 'performance', 'customer-reproduction']),
+              help="Starburst deployment preset")
+def prepare_starburst_cmd(cluster, preset):
+    """Prepare cluster for Starburst deployment (namespace, values file)"""
+    result = deploy_starburst(cluster, preset)
+    if not result["success"]:
+        click.echo(f"❌ Failed to prepare cluster: {result['error']}")
         raise click.Abort()
 
-    # Verify bucket exists and is platform managed
-    bucket_info = get_bucket_info(bucket_name, region)
-    if not bucket_info:
-        click.echo(f"❌ Bucket '{bucket_name}' not found in region '{region}'")
+@starburst.command("cleanup")
+@click.option("--cluster", required=True, help="Target local cluster")
+def cleanup_starburst_cmd(cluster):
+    """Clean up Starburst preparation artifacts"""
+    result = undeploy_starburst(cluster)
+    if not result["success"]:
+        click.echo(f"❌ Failed to cleanup: {result['error']}")
         raise click.Abort()
 
-    if not bucket_info['platform_managed']:
-        click.echo(f"❌ Bucket '{bucket_name}' is not platform-managed")
-        click.echo("Only platform-managed buckets can be deleted with this command")
-        raise click.Abort()
+@starburst.command("status")
+@click.option("--cluster", required=True, help="Target local cluster")
+def starburst_status_cmd(cluster):
+    """Check Starburst deployment status"""
+    from modules.starburst_module import get_deployment_status
+    status = get_deployment_status(cluster)
+    
+    click.echo(f"📊 Starburst Status for cluster '{cluster}':")
+    click.echo(f"   Deployed: {'✅ Yes' if status['deployed'] else '❌ No'}")
+    
+    if status["deployed"]:
+        click.echo(f"   Pods: {len(status['pods'])}")
+        for pod_name, pod_info in status["pods"].items():
+            status_icon = "✅" if pod_info["ready"] else "❌"
+            click.echo(f"     {status_icon} {pod_name}: {pod_info['status']}")
+        
+        click.echo(f"   Services: {len(status['services'])}")
+        for svc_name, svc_info in status["services"].items():
+            click.echo(f"     🔗 {svc_name}: {svc_info['type']}")
+    
+    click.echo(f"\n💡 To deploy Starburst manually:")
+    click.echo(f"   helm registry login harbor.starburstdata.net -u <username> -p <password>")
+    click.echo(f"   helm upgrade --install starburst-{cluster} oci://harbor.starburstdata.net/starburst-enterprise/starburst-enterprise --namespace starburst")
 
-    click.echo(f"🗑️ Deleting S3 bucket: {bucket_name}")
-    click.echo(f"   Region: {region}")
-    click.echo(f"   Size: {bucket_info['size_gb']} GB")
-    click.echo(f"   Owner: {bucket_info['owner']}")
+# ============================================================================
+# SHARED INFRASTRUCTURE MANAGEMENT (Admin)
+# ============================================================================
 
-    if force:
-        click.echo("\n⚠️ Force delete enabled - all contents will be permanently deleted!")
+@cli.group()
+def admin():
+    """Administrative commands for shared infrastructure"""
+    pass
 
-    if not confirm_action(f"Delete bucket '{bucket_name}'?", force=False):
-        click.echo("❌ Deletion cancelled")
-        return
+@admin.command("provision")
+@click.option("--component", help="Specific component to provision")
+def provision_infrastructure(component):
+    """Provision shared cloud infrastructure (Admin only)"""
+    click.echo("🏗️ Provisioning shared infrastructure...")
 
-    success = delete_s3_bucket(bucket_name, region, force=force)
-    if not success:
-        raise click.Abort()
+    provision_shared_infrastructure(component)
 
+    click.echo("✅ Shared infrastructure provisioned")
+
+@admin.command("status")
+def infrastructure_status():
+    """Check status of shared infrastructure"""
+    # Show status of shared databases, bastion hosts, etc.
+    pass
 
 if __name__ == "__main__":
     cli()

@@ -16,7 +16,7 @@ from botocore.exceptions import NoCredentialsError
 # Import from parent directory
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
-from config import PLATFORM_DIR, DEPLOYMENTS_DIR
+from config import PLATFORM_DIR, LOCAL_CLUSTERS_DIR
 
 
 def validate_aws_credentials():
@@ -178,9 +178,9 @@ def create_deployment_metadata(deployment_id, name, owner, purpose, expires_at, 
 
 
 def load_deployment_metadata(deployment_id):
-    """Load deployment metadata from file"""
-    deployment_dir = DEPLOYMENTS_DIR / deployment_id
-    metadata_file = deployment_dir / "metadata.json"
+    """Load cluster metadata from file (updated for local clusters)"""
+    cluster_dir = LOCAL_CLUSTERS_DIR / deployment_id
+    metadata_file = cluster_dir / "metadata.json"
 
     if not metadata_file.exists():
         return None
@@ -190,12 +190,12 @@ def load_deployment_metadata(deployment_id):
 
 
 def save_deployment_metadata(deployment_id, metadata):
-    """Save deployment metadata to file"""
-    deployment_dir = DEPLOYMENTS_DIR / deployment_id
-    metadata_file = deployment_dir / "metadata.json"
+    """Save cluster metadata to file (updated for local clusters)"""
+    cluster_dir = LOCAL_CLUSTERS_DIR / deployment_id
+    metadata_file = cluster_dir / "metadata.json"
 
-    # Ensure deployment directory exists
-    deployment_dir.mkdir(parents=True, exist_ok=True)
+    # Ensure cluster directory exists
+    cluster_dir.mkdir(parents=True, exist_ok=True)
 
     with open(metadata_file, 'w') as f:
         json.dump(metadata, f, indent=2)
@@ -203,12 +203,12 @@ def save_deployment_metadata(deployment_id, metadata):
 
 def list_deployments(owner=None, status=None, resource_type=None, expiring_soon=False,
                     running=None, stopped=None):
-    """List deployments with optional filters"""
+    """List local clusters with optional filters (updated for local clusters)"""
     deployments = []
 
-    for deployment_dir in DEPLOYMENTS_DIR.iterdir():
-        if deployment_dir.is_dir():
-            metadata_file = deployment_dir / "metadata.json"
+    for cluster_dir in LOCAL_CLUSTERS_DIR.iterdir():
+        if cluster_dir.is_dir():
+            metadata_file = cluster_dir / "metadata.json"
             if metadata_file.exists():
                 with open(metadata_file, 'r') as f:
                     metadata = json.load(f)

@@ -2,10 +2,9 @@
 Platform CLI Modules Package
 
 This package contains all the specialized modules for the Platform CLI tool:
-- eks_module: EKS cluster management
-- rds_module: RDS database management (PostgreSQL, MySQL, Oracle)
-- s3_module: S3 bucket management
 - utils_module: Shared utilities and helpers
+- local_cluster_module: Kind cluster management for local development
+- connectivity_module: SSH tunnel management for shared data sources
 """
 
 # Version information
@@ -28,34 +27,26 @@ from .utils_module import (
     sanitize_name
 )
 
-from .eks_module import (
-    scale_eks_nodegroups,
-    run_eksctl_command,
-    generate_eksctl_config,
-    get_cluster_vpc_info,
-    update_kubeconfig
+
+
+from .local_cluster_module import (
+    check_kind_available,
+    check_docker_available,
+    create_kind_cluster,
+    destroy_kind_cluster,
+    list_local_clusters,
+    get_cluster_info
 )
 
-from .rds_module import (
-    create_rds_instance,
-    get_rds_instance_status,
-    delete_rds_instance,
-    get_connection_string,
-    validate_engine_requirements,
-    DATABASE_ENGINES
-)
-
-from .s3_module import (
-    locate_s3_bucket,
-    create_s3_bucket,
-    delete_s3_bucket,
-    get_bucket_info,
-    list_platform_buckets,
-    validate_bucket_name
+from .connectivity_module import (
+    enable_data_source,
+    disable_data_source,
+    get_connection_info,
+    list_available_sources,
+    is_data_source_connected
 )
 
 # Package-level constants
-SUPPORTED_DATABASE_ENGINES = list(DATABASE_ENGINES.keys())
 SUPPORTED_REGIONS = [
     'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
     'ap-south-1', 'ap-southeast-1', 'ap-southeast-2',
@@ -66,19 +57,15 @@ SUPPORTED_REGIONS = [
 
 # Module information for debugging
 MODULE_INFO = {
-    "eks_module": "EKS cluster lifecycle management",
-    "rds_module": "Multi-engine RDS database management",
-    "s3_module": "S3 bucket creation and management",
-    "utils_module": "Shared utilities and AWS helpers"
+    "utils_module": "Shared utilities and AWS helpers",
+    "local_cluster_module": "Kind cluster management for local development",
+    "connectivity_module": "SSH tunnel management for shared data sources"
 }
 
 def get_module_info():
     """Get information about available modules"""
     return MODULE_INFO
 
-def get_supported_engines():
-    """Get list of supported database engines"""
-    return SUPPORTED_DATABASE_ENGINES
 
 def get_supported_regions():
     """Get list of supported AWS regions"""
@@ -87,7 +74,7 @@ def get_supported_regions():
 # Validation functions for package health
 def validate_all_modules():
     """Validate that all modules can be imported successfully"""
-    modules = ['eks_module', 'rds_module', 's3_module', 'utils_module']
+    modules = ['utils_module', 'local_cluster_module', 'connectivity_module']
     results = {}
 
     for module_name in modules:
