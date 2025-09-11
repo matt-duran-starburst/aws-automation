@@ -204,6 +204,15 @@ def generate_values_file(preset: str, connected_sources: List[str] = None, clust
             "ports": {
                 "http": {"port": 8080, "nodePort": 30080}
             }
+        },
+        # External PostgreSQL database for Starburst metadata
+        "backend": {
+            "type": "POSTGRESQL",
+            "config": {
+                "databaseUrl": "jdbc:postgresql://postgres:5432/starburst",
+                "username": "starburst",
+                "password": "starburst123"
+            }
         }
     }
     
