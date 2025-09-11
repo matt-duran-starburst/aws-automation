@@ -1,19 +1,33 @@
-# Core dependencies
+# Core CLI dependencies
 click>=8.0.0
 boto3>=1.26.0
 botocore>=1.29.0
 PyYAML>=6.0
-
-# Environment and configuration
 python-dotenv>=0.19.0
 
-# Date/time handling (included in stdlib but explicit for clarity)
-# datetime - stdlib
-# json - stdlib
-# pathlib - stdlib
+# Infrastructure Management
+pulumi>=3.0.0
+pulumi-aws>=6.0.0
+pulumi-gcp>=7.0.0
+pulumi-azure>=5.0.0
 
-# AWS CLI integration (optional but recommended)
-# awscli>=2.0.0  # Uncomment if you want to include AWS CLI as a pip dependency
+# Kubernetes and Local Cluster Management
+kubernetes>=25.0.0
+#kind>=0.1.0  # Python wrapper for Kind
+docker>=6.0.0
+
+# Helm Integration
+helm>=1.0.0  # Python Helm client
+subprocess-run>=1.0.0  # For Helm CLI execution
+
+# SSH and Connectivity
+paramiko>=3.0.0  # SSH client library
+sshtunnel>=0.4.0  # SSH tunnel management
+pexpect>=4.8.0  # For interactive SSH operations
+
+# Template Generation
+jinja2>=3.1.0  # For Helm values template generation
+jsonschema>=4.0.0  # Configuration validation
 
 # Development dependencies (uncomment for development)
 # pytest>=7.0.0
@@ -22,10 +36,6 @@ python-dotenv>=0.19.0
 # flake8>=5.0.0
 # mypy>=0.991
 
-# Documentation dependencies (uncomment for docs generation)
-# sphinx>=5.0.0
-# sphinx-rtd-theme>=1.0.0
-
-# Security scanning (uncomment for security audits)
-# bandit>=1.7.0
-# safety>=2.0.0
+# Testing for new components
+# pytest-kubernetes>=1.0.0
+# pytest-docker>=1.0.0
