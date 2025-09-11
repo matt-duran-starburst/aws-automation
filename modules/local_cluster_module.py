@@ -31,6 +31,7 @@ CLUSTER_PRESETS = {
         "features": {
             "ingress": True,
             "registry": True,
+            "database": True,
             "port_forwards": [80, 443, 8080, 5432, 3306]
         },
         "resources": {
@@ -47,6 +48,7 @@ CLUSTER_PRESETS = {
         "features": {
             "ingress": True,
             "registry": True,
+            "database": True,
             "port_forwards": [80, 443, 8080, 5432, 3306, 1521]
         },
         "resources": {
@@ -63,6 +65,7 @@ CLUSTER_PRESETS = {
         "features": {
             "ingress": True,
             "registry": True,
+            "database": True,
             "monitoring": True,
             "port_forwards": [80, 443, 8080, 5432, 3306, 1521, 9000]
         },
@@ -219,9 +222,12 @@ def create_kind_cluster(cluster_name, preset="development"):
         click.echo(f"   Switch context: kubectl config use-context kind-{cluster_name}")
         click.echo(f"   Check nodes:    kubectl get nodes")
         click.echo(f"   Check pods:     kubectl get pods -A")
+        click.echo(f"   Check database: kubectl get pods -l app=postgres")
         click.echo(f"\n💡 Next Steps:")
-        click.echo(f"   Deploy Starburst: python3 platform_cli.py starburst deploy --cluster {cluster_name}")
+        click.echo(f"   Prepare Starburst: python3 platform_cli.py starburst prepare --cluster {cluster_name}")
         click.echo(f"   Enable data sources: python3 platform_cli.py connect enable <source>")
+        if preset_config["features"].get("database"):
+            click.echo(f"   PostgreSQL ready: localhost:30432 (user: starburst, db: starburst)")
 
         return metadata
 
@@ -266,6 +272,10 @@ def setup_cluster_features(cluster_name, preset_config):
     # Set up local registry if enabled
     if preset_config["features"].get("registry"):
         setup_local_registry(cluster_name)
+    
+    # Set up local database if enabled
+    if preset_config["features"].get("database"):
+        setup_local_database(cluster_name)
 
 
 def switch_kubectl_context(cluster_name):
@@ -280,6 +290,117 @@ def switch_kubectl_context(cluster_name):
     except subprocess.CalledProcessError as e:
         click.echo(f"⚠️ Warning: Failed to switch kubectl context: {e}")
         return False
+
+
+def setup_local_database(cluster_name):
+    """Set up a local PostgreSQL database for Starburst"""
+    context = f"kind-{cluster_name}"
+    
+    try:
+        click.echo(f"🗄️  Setting up PostgreSQL database for Starburst...")
+        
+        # Create PostgreSQL deployment
+        postgres_yaml = f"""
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: default
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        env:
+        - name: POSTGRES_DB
+          value: starburst
+        - name: POSTGRES_USER
+          value: starburst
+        - name: POSTGRES_PASSWORD
+          value: starburst123
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: postgres-storage
+        emptyDir: {{}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: default
+  labels:
+    app: postgres
+spec:
+  type: NodePort
+  ports:
+  - port: 5432
+    targetPort: 5432
+    nodePort: 30432
+  selector:
+    app: postgres
+"""
+        
+        # Apply PostgreSQL deployment
+        postgres_process = subprocess.Popen(
+            ['kubectl', 'apply', '--context', context, '-f', '-'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        stdout, stderr = postgres_process.communicate(input=postgres_yaml)
+        
+        if postgres_process.returncode == 0:
+            click.echo("✅ PostgreSQL database deployed")
+            
+            # Wait for PostgreSQL to be ready
+            click.echo("⏳ Waiting for PostgreSQL to be ready...")
+            wait_cmd = [
+                'kubectl', 'wait', '--context', context,
+                '--for=condition=ready', 'pod',
+                '--selector=app=postgres',
+                '--timeout=120s'
+            ]
+            
+            wait_result = subprocess.run(wait_cmd, capture_output=True, text=True, timeout=130)
+            
+            if wait_result.returncode == 0:
+                click.echo("✅ PostgreSQL is ready")
+                click.echo(f"   Connection: localhost:30432")
+                click.echo(f"   Database: starburst")
+                click.echo(f"   Username: starburst") 
+                click.echo(f"   Password: starburst123")
+            else:
+                click.echo(f"⚠️  PostgreSQL deployment may still be starting: {wait_result.stderr}")
+        else:
+            click.echo(f"⚠️  Warning: Failed to deploy PostgreSQL: {stderr}")
+            
+    except Exception as e:
+        click.echo(f"⚠️  Warning: Failed to set up PostgreSQL database: {e}")
 
 
 def setup_local_registry(cluster_name):
