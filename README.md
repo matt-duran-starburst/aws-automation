@@ -1,65 +1,92 @@
-# Platform Tool MVP Setup Guide - EKS with eksctl
+# Platform CLI Tool - Local Development with Shared Cloud Data Sources
 
-This guide will help you set up the MVP version of the Platform CLI tool for AWS EKS cluster deployments using eksctl.
+This Platform CLI tool enables support engineers and internal teams to create fast, local Kubernetes clusters for Starburst development with access to shared cloud data sources. The tool has been transformed from individual EKS cluster provisioning to a lightweight local-first architecture.
+
+## Project Scope
+
+**Platform CLI** provides local development environments with secure access to shared cloud data sources. The tool creates local Kind clusters with Starburst Enterprise Platform and connects to shared databases across AWS, GCP, and Azure through SSH tunnels and bastion hosts.
+
+### Key Features
+- **Local Kind Clusters**: Fast, lightweight Kubernetes environments (2-5 minutes vs 20-40 minutes)
+- **Shared Infrastructure**: Cost-effective shared databases instead of individual resources per user
+- **Multi-Cloud Support**: Connect to AWS, GCP, and Azure data sources
+- **Starburst Ready**: Automated namespace and configuration generation for Starburst deployment
+- **PostgreSQL Integration**: Built-in PostgreSQL database for Starburst metadata
 
 ## Repository Structure
 
-Create your new repository with this simplified structure:
-
 ```
 platform-tool/
-├── platform_cli.py             # Main CLI tool
-├── requirements.txt             # Python dependencies
+├── platform_cli.py                 # Main CLI entry point
+├── config.py                       # User configuration and platform settings
+├── requirements.txt                 # Python dependencies
 ├── README.md
-├── .gitignore
-└── .github/
-    └── workflows/
-        └── ci.yml
+├──
+├── modules/                         # Core functionality modules
+│   ├── __init__.py                 # Module exports and validation
+│   ├── utils_module.py             # Shared utilities and AWS validation
+│   ├── local_cluster_module.py     # Kind cluster management
+│   ├── connectivity_module.py      # SSH tunnels and data sources
+│   ├── starburst_module.py         # Starburst deployment preparation
+│   ├── shared_data_module.py       # Shared data source management
+│   └── pulumi_module.py            # Shared infrastructure management
+│
+├── helm/                           # Kubernetes deployment configs
+│   └── values-templates/           # Generated Starburst values files
+│
+└── connectivity/                   # Connection management
+    ├── ssh_configs/               # SSH tunnel configurations
+    └── connection_profiles/       # Data source connection profiles
 ```
-
-No Terraform modules needed! We're using eksctl directly for simplicity.
 
 ## Prerequisites
 
-1. **AWS CLI with SSO configured**
+1. **Docker Desktop** with 4GB+ memory allocated
    ```bash
-   aws configure sso
-   aws sso login --profile your-sandbox-profile
+   # Check Docker status
+   docker info
    ```
 
-2. **eksctl installed**
+2. **Kind** (Kubernetes in Docker)
    ```bash
    # macOS
-   brew tap weaveworks/tap
-   brew install weaveworks/tap/eksctl
+   brew install kind
 
-   # Other platforms: https://eksctl.io/installation/
+   # Linux
+   curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+   chmod +x ./kind && sudo mv ./kind /usr/local/bin/kind
    ```
 
-3. **Python 3.8+**
+3. **kubectl** (Kubernetes CLI)
+   ```bash
+   # macOS
+   brew install kubectl
+
+   # Linux
+   curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+   ```
+
+4. **Helm** (for Starburst deployment)
+   ```bash
+   # macOS
+   brew install helm
+
+   # Linux
+   curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+   ```
+
+5. **Python 3.8+**
    ```bash
    python3 --version
    ```
 
-4. **kubectl installed**
-   ```bash
-   # macOS
-   brew install kubectl
-   ```
+## Installation
 
-5. **K9s (optional but recommended)**
-   ```bash
-   # macOS
-   brew install k9s
-   ```
-
-## Installation Steps
-
-### 1. Create Python Environment
+### 1. Set Up Python Environment
 
 ```bash
-# Clone your repository
-git clone https://github.com/yourorg/platform-tool.git
+# Clone the repository
+git clone <repository-url>
 cd platform-tool
 
 # Create virtual environment
@@ -70,423 +97,290 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Create requirements.txt
-
-```txt
-click>=8.0.0
-boto3>=1.26.0
-botocore>=1.29.0
-PyYAML>=6.0
-```
-
-### 3. Make CLI Tool Executable
+### 2. Make CLI Executable
 
 ```bash
 chmod +x platform_cli.py
 
-# Create symlink for easy access (optional)
+# Optional: Create symlink for easier access
 ln -s $(pwd)/platform_cli.py /usr/local/bin/platform
 ```
 
 ## First Time Setup
 
-### 1. Run Initial Setup
-
-Before creating any deployments, you need to configure your profile and tagging information:
+### 1. Run Initial Configuration
 
 ```bash
-# Run the interactive setup
-./platform_cli.py setup
+# Configure your user profile and settings
+python3 platform_cli.py setup
 ```
 
 This will prompt you for:
-- **Your name** (for tagging)
-- **Your email** (default owner for deployments)
-- **Organization** (e.g., 'cs', 'sales', 'engineering')
-- **Team** (e.g., 'tse', 'tam', 'cse', 'sa')
-- **Default environment** (e.g., 'demo', 'sandbox')
-- **Default AWS region** (e.g., 'us-east-1')
-- **SSH key name** (e.g., 'your-key-name')
+- **Your name** (for user attribution)
+- **Your email** (for usage tracking)
+- **Organization** (e.g., 'starburst', 'customer-success')
+- **Team** (e.g., 'support', 'engineering', 'sales')
 
 Example setup session:
 ```
 🔧 Platform Tool Initial Setup
-This will configure your profile and tagging information.
+This will configure your profile for local development.
 
 👤 User Profile:
-Your name (for tagging): John Doe
-Your email address: john.doe@company.com
-
-🏢 Organization Information:
-Organization/Department (e.g., 'cs', 'sales', 'engineering'): cs
-Team (e.g., 'tse', 'tam', 'cse', 'sa'): tse
-
-☁️ Default Settings:
-Default environment: demo
-Default AWS region: us-east-1
-Default SSH key name: my-key
+Your name: Matthew Duran
+Your email: matthew.duran@starburstdata.com
+Organization: starburst
+Team: support
 
 ✅ Setup completed!
-```
-
-These tags will be automatically applied to all AWS resources you create:
-```yaml
-tags:
-  cloud: aws
-  environment: demo
-  org: cs
-  team: tse
-  user: john-doe
-  PlatformManaged: true
+Configuration saved to ~/.platform/config.json
 ```
 
 ### 2. Verify Configuration
 
 ```bash
-# View your current configuration
-./platform_cli.py config
+# View current configuration
+python3 platform_cli.py config
 ```
 
-## First EKS Cluster Deployment
+## Quick Start
 
-### 1. Create Your First EKS Cluster
+### 1. Create Your First Local Cluster
 
 ```bash
-# Ensure you've completed setup first
-./platform_cli.py setup
-
-# Create a development cluster (uses your configured email as owner)
-./platform_cli.py create eks-cluster \
-  --name "my-first-test" \
-  --purpose "testing platform tool" \
-  --expires-in 1d \
+# Create a development cluster with PostgreSQL database
+python3 platform_cli.py local create \
+  --name devtest \
   --preset development
 ```
 
 **What happens:**
-1. Tool validates AWS credentials and checks setup completion
-2. Uses your configured email as the default owner
-3. Fetches available VPC subnets in your region
-4. Prompts you to select private subnets (or use `--auto-select-subnets`)
-5. Generates eksctl YAML configuration with your configured tags
-6. Creates EKS cluster with 3 node groups: base, coordinator, workers
-7. Takes ~10-15 minutes to complete
+1. Creates Kind cluster with control plane and worker nodes (2-5 minutes)
+2. Installs NGINX ingress controller
+3. Sets up local Docker registry
+4. Deploys PostgreSQL database for Starburst
+5. Configures kubectl context automatically
 
-### 2. Alternative: Specify Different Owner
+### 2. Prepare Cluster for Starburst
 
 ```bash
-# Override the default owner email
-./platform_cli.py create eks-cluster \
-  --name "team-cluster" \
-  --owner "different.person@company.com" \
-  --preset performance \
-  --expires-in 3d
+# Generate namespace and values file for Starburst deployment
+python3 platform_cli.py starburst prepare \
+  --cluster devtest \
+  --preset development
 ```
 
-### 3. Access Your Cluster
+This creates:
+- Starburst namespace
+- Helm values file with minimal resource requirements
+- Connection configuration for local PostgreSQL
+
+### 3. Deploy Starburst (Manual)
 
 ```bash
-# Update kubeconfig (or use the built-in command)
-./platform_cli.py update-kubeconfig my-deployment-id
+# Login to Starburst Harbor registry with your credentials
+helm registry login harbor.starburstdata.net -u <username> -p <password>
 
-# Access with K9s
-k9s
+# Deploy using the generated values file
+helm upgrade --install starburst-devtest \
+  oci://harbor.starburstdata.net/starburst-enterprise/starburst-enterprise \
+  --namespace starburst \
+  --values ~/.platform/helm/values-templates/starburst-devtest-development.yaml \
+  --values your-registry-values.yaml
+```
 
-# Or use kubectl
+### 4. Access Your Cluster
+
+```bash
+# Check cluster status
 kubectl get nodes
-kubectl get pods --all-namespaces
+kubectl get pods -A
+
+# Check PostgreSQL database
+kubectl get pods -l app=postgres
+
+# Access Starburst (after deployment)
+kubectl port-forward service/starburst 8080:8080 -n starburst
+# Then visit: http://localhost:8080
 ```
 
-## Cost Management with Start/Stop
+## Core Commands
 
-### Stop a Cluster (Scale to 0)
+### Local Cluster Management
 
 ```bash
-# Stop cluster to save costs when not in use
-./platform_cli.py stop my-deployment-id
+# Create clusters
+python3 platform_cli.py local create --name mytest --preset development
+python3 platform_cli.py local create --name perftest --preset performance
 
-# This will:
-# - Scale all node groups to 0 instances
-# - Keep the cluster control plane running
-# - Reduce costs to nearly $0 while stopped
+# List clusters
+python3 platform_cli.py local list
+
+# Destroy clusters
+python3 platform_cli.py local destroy --name mytest --force
+
+# Get cluster information
+kubectl config get-contexts
 ```
 
-### Start a Cluster (Scale Back Up)
+### Starburst Management
 
 ```bash
-# Start cluster when you need it again
-./platform_cli.py start my-deployment-id
+# Prepare cluster for Starburst
+python3 platform_cli.py starburst prepare --cluster mytest --preset development
 
-# This will:
-# - Scale node groups back to their original sizes
-# - Takes 2-3 minutes for nodes to be ready
-# - Restore full functionality
+# Check deployment status
+python3 platform_cli.py starburst status --cluster mytest
+
+# Clean up preparation artifacts
+python3 platform_cli.py starburst cleanup --cluster mytest
 ```
 
-### Check Status
+### Data Source Management
 
 ```bash
-# See which deployments are running vs stopped
-./platform_cli.py list --running    # Only running deployments
-./platform_cli.py list --stopped    # Only stopped deployments
-./platform_cli.py list              # All deployments with status
+# List available shared data sources
+python3 platform_cli.py connect list
+
+# Enable connection to a data source
+python3 platform_cli.py connect enable aws-postgres
+
+# Check connection status
+python3 platform_cli.py connect info aws-postgres
+
+# Disable connection
+python3 platform_cli.py connect disable aws-postgres
 ```
 
-## Common Commands
+### Shared Infrastructure (Admin Only)
 
-### Deployment Management
 ```bash
-# List all deployments
-./platform_cli.py list
+# Provision shared infrastructure (requires admin access)
+python3 platform_cli.py admin provision --stacks shared-databases
 
-# List your deployments only
-./platform_cli.py list --owner your.email@company.com
+# Check infrastructure status
+python3 platform_cli.py admin status
 
-# Show expiring deployments
-./platform_cli.py list --expiring-soon
-
-# Show only running clusters
-./platform_cli.py list --status running
-
-# Show only running (scaled up) vs stopped (scaled down)
-./platform_cli.py list --running
-./platform_cli.py list --stopped
-
-# Extend a deployment
-./platform_cli.py extend my-deployment-id --expires-in 3d
-
-# Destroy a deployment
-./platform_cli.py destroy my-deployment-id
-
-# Force destroy without confirmation
-./platform_cli.py destroy my-deployment-id --force
+# Destroy shared infrastructure
+python3 platform_cli.py admin destroy --stacks shared-databases
 ```
 
-### Cost Management
-```bash
-# Stop cluster to save costs
-./platform_cli.py stop my-deployment-id
+## Cluster Presets
 
-# Start cluster when needed
-./platform_cli.py start my-deployment-id
+### Development (Default)
+- **Resources**: Coordinator 1Gi, Worker 1.5Gi (~2.5GB total)
+- **Use Case**: Basic development, testing features
+- **Docker Memory**: 4GB+ recommended
 
-# Force start/stop without confirmation
-./platform_cli.py stop my-deployment-id --force
-./platform_cli.py start my-deployment-id --force
-```
+### Performance
+- **Resources**: Coordinator 2Gi, Worker 3Gi (~5GB total)
+- **Use Case**: Query testing, moderate datasets
+- **Docker Memory**: 6GB+ recommended
 
-### Configuration
-```bash
-# View current configuration
-./platform_cli.py config
+### Customer Reproduction
+- **Resources**: Coordinator 4Gi, Workers 2x4Gi (~12GB total)
+- **Use Case**: Reproducing customer issues
+- **Docker Memory**: 8GB+ recommended
 
-# Update individual settings
-./platform_cli.py config --set-region us-west-2
-./platform_cli.py config --set-team tam
-./platform_cli.py config --set-environment production
+## Configuration Files
 
-# Reset configuration and run setup again
-./platform_cli.py config --reset
-
-# Update kubeconfig for existing deployment
-./platform_cli.py update-kubeconfig my-deployment-id
-```
-
-### Quick Examples
-```bash
-# Quick development cluster for testing
-./platform_cli.py create eks-cluster --name "quick-test" --preset demo --expires-in 4h --auto-select-subnets
-
-# Performance testing cluster
-./platform_cli.py create eks-cluster --name "perf-test" --preset performance --expires-in 2d
-
-# Stop all your clusters before weekend
-./platform_cli.py list --owner me@company.com --running | grep "✅" | awk '{print $2}' | xargs -I {} ./platform_cli.py stop {} --force
-
-# Start a specific cluster for Monday morning
-./platform_cli.py start my-cluster-id
-```
-
-## Generated Files Structure
-
-After first run:
+After setup, the tool creates:
 
 ```
 ~/.platform/
-├── config.json                 # Platform configuration
-└── deployments/
-    └── your-first-test-2025-07-13/
-        ├── cluster.yaml         # Generated eksctl config
-        └── metadata.json        # Deployment metadata
-```
-
-## Configuration Presets
-
-The tool includes three built-in presets:
-
-### Development (default)
-- Base: 1x m6g.xlarge (spot)
-- Coordinator: 1x m6g.xlarge (spot)
-- Workers: 1x m6g.xlarge, max 2 (spot)
-
-### Performance
-- Base: 1x m6g.xlarge (spot)
-- Coordinator: 1x m6g.2xlarge (spot)
-- Workers: 2x m6g.2xlarge, max 4 (spot)
-
-### Demo
-- Base: 1x t3.medium (spot)
-- Coordinator: 1x t3.large (spot)
-- Workers: 1x t3.large, max 2 (spot)
-
-## Subnet Selection
-
-The tool will:
-1. Fetch all subnets in your specified region
-2. Filter for private subnets (recommended for EKS)
-3. Show you a list to choose from
-4. Or use `--auto-select-subnets` to pick automatically
-
-Example subnet selection:
-```
-📋 Available private subnets:
-  1. Private Subnet 1 (subnet-abc123) - us-east-1a - 10.0.1.0/24
-  2. Private Subnet 2 (subnet-def456) - us-east-1b - 10.0.2.0/24
-  3. Private Subnet 3 (subnet-ghi789) - us-east-1c - 10.0.3.0/24
-
-Select subnets (comma-separated numbers, e.g., 1,2,3): 1,2
+├── config.json                     # User configuration
+├── local_clusters/                 # Cluster metadata
+│   └── devtest/
+│       ├── kind-config.yaml        # Kind cluster configuration
+│       ├── metadata.json           # Cluster metadata
+│       └── postgres_port_forward.pid # Port forwarding process
+├── helm/                           # Helm configurations
+│   └── values-templates/           # Generated Starburst values
+├── connectivity/                   # Connection profiles
+│   └── connection_profiles/        # Data source connections
+└── usage/                         # Usage tracking logs
+    └── usage_20250115.jsonl       # Daily usage logs
 ```
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **"No AWS credentials found"**
+1. **"Port already allocated" during cluster creation**
    ```bash
-   aws sso login --profile your-sandbox-profile
-   export AWS_PROFILE=your-sandbox-profile
+   # Check what's using the ports
+   docker ps
+
+   # Clean up existing clusters
+   python3 platform_cli.py local list
+   python3 platform_cli.py local destroy --name <cluster> --force
    ```
 
-2. **"eksctl command not found"**
+2. **PostgreSQL connection issues**
    ```bash
-   # Install eksctl first
-   brew install eksctl  # macOS
-   # or follow: https://eksctl.io/installation/
+   # Check PostgreSQL pod status
+   kubectl get pods -l app=postgres
+
+   # Check port forwarding
+   ps aux | grep "kubectl.*port-forward"
+
+   # Test connection
+   psql -h localhost -p 5432 -U starburst -d starburst
    ```
 
-3. **"No private subnets found"**
+3. **Insufficient Docker memory**
    ```bash
-   # Check your VPC has private subnets in the region
-   aws ec2 describe-subnets --region us-east-1
+   # Check Docker settings
+   # Docker Desktop > Settings > Resources > Memory
+   # Increase to 4GB+ for development, 8GB+ for performance
    ```
 
-4. **SSH key not found**
+4. **Starburst coordinator not starting**
    ```bash
-   # Update your default key name or create the key
-   ./platform.py config --set-key-name your-existing-key-name
+   # Check coordinator logs
+   kubectl logs deployment/coordinator -n starburst
+
+   # Verify discovery URI configuration
+   kubectl exec deployment/coordinator -n starburst -- cat /etc/starburst/config.properties
    ```
 
 ### Logs and Debugging
 
 ```bash
-# Check deployment directory for details
-ls ~/.platform/deployments/
+# Check cluster status
+kubectl cluster-info --context kind-devtest
 
-# View generated eksctl config
-cat ~/.platform/deployments/your-deployment-id/cluster.yaml
+# View all pods across namespaces
+kubectl get pods -A
 
-# Check AWS resources
-aws eks describe-cluster --name your-deployment-id --region us-east-1
+# Check Starburst deployment
+kubectl get pods -n starburst
+kubectl logs -n starburst deployment/coordinator
+kubectl logs -n starburst deployment/worker
 
-# eksctl logs
-eksctl utils describe-stacks --region us-east-1 --cluster your-deployment-id
+# Check port forwarding processes
+ps aux | grep port-forward
+
+# View generated Starburst values
+cat ~/.platform/helm/values-templates/starburst-devtest-development.yaml
 ```
 
-## Next Steps for Full Platform
+## Docker Memory Configuration
 
-Once the EKS MVP is working:
+For optimal performance, configure Docker Desktop memory:
 
-1. **Add Starburst deployment**
-   ```bash
-   # Future command structure
-   ./platform.py deploy starburst --to-cluster my-cluster --values-file ./starburst-values.yaml
-   ```
+- **Minimum**: 4GB (development preset)
+- **Recommended**: 6GB (performance preset)
+- **Ideal**: 8GB+ (customer-reproduction preset)
 
-2. **Add Hive Metastore deployment**
-   ```bash
-   # Future command structure
-   ./platform.py deploy hive-metastore --to-cluster my-cluster --config ./hive-config.yaml
-   ```
+**To configure:**
+1. Docker Desktop → Settings → Resources → Memory
+2. Increase memory allocation
+3. Apply & Restart Docker
 
-3. **Add customer reproduction workflow**
-   ```bash
-   # Future command structure
-   ./platform.py reproduce-customer-issue --starburst-values ./customer-values.yaml
-   ```
+## Next Steps
 
-4. **Add auto-cleanup automation**
-5. **Create web interface**
-
-## GitHub Actions (Optional)
-
-Create `.github/workflows/ci.yml`:
-
-```yaml
-name: Platform Tool CI
-
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
-
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-
-    - name: Run syntax checks
-      run: |
-        python -m py_compile platform_cli.py
-
-    - name: Install eksctl
-      run: |
-        curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-        sudo mv /tmp/eksctl /usr/local/bin
-
-    - name: Validate tool help
-      run: |
-        python platform_cli.py --help
-        python platform_cli.py create --help
-```
-
-## Example Usage Patterns
-
-```bash
-# Quick development cluster for testing
-./platform.py create eks-cluster --name "quick-test" --owner "me@company.com" --preset demo --expires-in 4h --auto-select-subnets
-
-# Performance testing cluster
-./platform.py create eks-cluster --name "perf-test" --owner "me@company.com" --preset performance --expires-in 2d
-
-# Using your own eksctl config
-./platform.py create eks-cluster --name "custom" --owner "me@company.com" --eksctl-config ./my-cluster.yaml
-
-# Check what's expiring soon
-./platform.py list --expiring-soon
-
-# Clean up everything for a user
-./platform.py list --owner me@company.com | grep "my-deployment" | xargs -I {} ./platform.py destroy {} --force
-```
+1. **Connect to shared data sources** using the connectivity module
+2. **Deploy your own Starburst configurations** with custom catalogs
+3. **Set up shared infrastructure** for team-wide data access
+4. **Integrate with CI/CD pipelines** for automated testing
