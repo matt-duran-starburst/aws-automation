@@ -16,9 +16,8 @@ kubernetes>=25.0.0
 #kind>=0.1.0  # Python wrapper for Kind
 docker>=6.0.0
 
-# Helm Integration
-helm>=1.0.0  # Python Helm client
-subprocess-run>=1.0.0  # For Helm CLI execution
+# Helm Integration (using subprocess to call Helm CLI directly)
+# No Python package needed - Helm CLI must be installed separately
 
 # SSH and Connectivity
 paramiko>=3.0.0  # SSH client library
