@@ -476,10 +476,15 @@ spec:
             
             if wait_result.returncode == 0:
                 click.echo("✅ PostgreSQL is ready")
-                click.echo(f"   Connection: localhost:30432")
+                
+                # Set up port forwarding for local access
+                setup_postgres_port_forward(cluster_name)
+                
+                click.echo(f"   Local connection: localhost:5432")
                 click.echo(f"   Database: starburst")
                 click.echo(f"   Username: starburst") 
                 click.echo(f"   Password: starburst123")
+                click.echo(f"   Test connection: psql -h localhost -p 5432 -U starburst -d starburst")
             else:
                 click.echo(f"⚠️  PostgreSQL deployment may still be starting: {wait_result.stderr}")
         else:
@@ -487,6 +492,62 @@ spec:
             
     except Exception as e:
         click.echo(f"⚠️  Warning: Failed to set up PostgreSQL database: {e}")
+
+
+def setup_postgres_port_forward(cluster_name):
+    """Set up port forwarding for PostgreSQL access"""
+    context = f"kind-{cluster_name}"
+    
+    try:
+        # Kill any existing port-forward processes for this port
+        try:
+            subprocess.run(['pkill', '-f', 'kubectl.*port-forward.*postgres'], 
+                         capture_output=True, check=False)
+        except:
+            pass
+        
+        # Start port forwarding in background
+        click.echo("🔄 Setting up PostgreSQL port forwarding...")
+        
+        port_forward_cmd = [
+            'kubectl', 'port-forward', '--context', context,
+            'service/postgres', '5432:5432', '--namespace', 'default'
+        ]
+        
+        # Start the port-forward process in the background
+        process = subprocess.Popen(
+            port_forward_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # Give it a moment to establish
+        import time
+        time.sleep(2)
+        
+        # Check if port forwarding is working
+        if process.poll() is None:  # Process is still running
+            click.echo("✅ PostgreSQL port forwarding active (localhost:5432)")
+            
+            # Save the PID for cleanup later
+            cluster_dir = LOCAL_CLUSTERS_DIR / cluster_name
+            pid_file = cluster_dir / "postgres_port_forward.pid"
+            with open(pid_file, 'w') as f:
+                f.write(str(process.pid))
+                
+        else:
+            # Process died, check error
+            stdout, stderr = process.communicate()
+            click.echo(f"⚠️  Port forwarding failed: {stderr}")
+            click.echo("💡 Alternative connection methods:")
+            click.echo(f"   NodePort: kubectl port-forward --context {context} service/postgres 5432:5432")
+            click.echo(f"   Direct: docker exec -it {cluster_name}-control-plane psql -h postgres -U starburst")
+            
+    except Exception as e:
+        click.echo(f"⚠️  Failed to set up port forwarding: {e}")
+        click.echo("💡 Manual port forwarding:")
+        click.echo(f"   kubectl port-forward --context {context} service/postgres 5432:5432")
 
 
 def setup_local_registry(cluster_name):
@@ -577,7 +638,32 @@ def destroy_kind_cluster(cluster_name):
     except Exception as e:
         destruction_steps.append(f"⚠️  Registry cleanup warning: {e}")
     
-    # Step 3: Clean up local metadata and files
+    # Step 3: Clean up port forwarding processes
+    try:
+        click.echo("🔄 Stopping port forwarding processes...")
+        cluster_dir = LOCAL_CLUSTERS_DIR / cluster_name
+        pid_file = cluster_dir / "postgres_port_forward.pid"
+        
+        if pid_file.exists():
+            with open(pid_file, 'r') as f:
+                pid = f.read().strip()
+            try:
+                subprocess.run(['kill', pid], capture_output=True, check=False)
+                destruction_steps.append("✅ Port forwarding stopped")
+            except:
+                destruction_steps.append("⚠️  Port forwarding process may have already stopped")
+        else:
+            destruction_steps.append("✅ No port forwarding to stop")
+            
+        # Also kill any kubectl port-forward processes for this cluster
+        subprocess.run([
+            'pkill', '-f', f'kubectl.*port-forward.*{cluster_name}'
+        ], capture_output=True, check=False)
+        
+    except Exception as e:
+        destruction_steps.append(f"⚠️  Port forwarding cleanup warning: {e}")
+    
+    # Step 4: Clean up local metadata and files
     try:
         click.echo("🔄 Cleaning up local files...")
         cluster_dir = LOCAL_CLUSTERS_DIR / cluster_name
@@ -590,7 +676,7 @@ def destroy_kind_cluster(cluster_name):
     except Exception as e:
         destruction_steps.append(f"⚠️  Metadata cleanup warning: {e}")
     
-    # Step 4: Clean up any remaining Docker containers
+    # Step 5: Clean up any remaining Docker containers
     try:
         click.echo("🔄 Checking for orphaned containers...")
         container_check = subprocess.run([
@@ -609,7 +695,7 @@ def destroy_kind_cluster(cluster_name):
     except Exception as e:
         destruction_steps.append(f"⚠️  Container cleanup warning: {e}")
     
-    # Step 5: Clean up any Helm releases (in case they exist)
+    # Step 6: Clean up any Helm releases (in case they exist)
     try:
         click.echo("🔄 Checking for Starburst installations...")
         helm_check = subprocess.run([
