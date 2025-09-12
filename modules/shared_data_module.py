@@ -698,3 +698,230 @@ def get_sample_datasets_info(source_id: str) -> Dict[str, Any]:
         "datasets": datasets,
         "total_datasets": len(datasets)
     }
+
+# ============================================================================
+# USER-SPECIFIC DATA SOURCE ISOLATION
+# ============================================================================
+
+def get_user_catalogs(user_profile=None, enabled_sources=None):
+    """Generate user-specific catalog configurations for Starburst"""
+    try:
+        from config import get_user_database_config, get_user_catalog_names
+    except ImportError:
+        return {
+            "success": False, 
+            "error": "Configuration module not available"
+        }
+    
+    if enabled_sources is None:
+        # Get list of enabled data sources from user's connection profiles
+        enabled_sources = _get_user_enabled_sources()
+    
+    try:
+        db_config = get_user_database_config(user_profile)
+        catalog_names = get_user_catalog_names(enabled_sources, user_profile)
+        
+        catalogs = {}
+        
+        # Generate catalog configuration for each enabled source
+        for source_id in enabled_sources:
+            if source_id not in DATA_SOURCE_TYPES:
+                continue
+                
+            source_config = DATA_SOURCE_TYPES[source_id] 
+            catalog_info = catalog_names.get(source_config["type"])
+            
+            if not catalog_info:
+                continue
+            
+            catalog_def = _generate_user_catalog_definition(
+                source_id, 
+                source_config, 
+                catalog_info, 
+                db_config
+            )
+            
+            if catalog_def:
+                catalogs[catalog_info["catalog_name"]] = catalog_def
+        
+        return {
+            "success": True,
+            "user": db_config["schema_prefix"],
+            "catalogs": catalogs,
+            "catalog_count": len(catalogs)
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to generate user catalogs: {str(e)}"
+        }
+
+def _generate_user_catalog_definition(source_id, source_config, catalog_info, db_config):
+    """Generate catalog definition for a specific data source"""
+    source_type = source_config["type"]
+    
+    if source_type == "postgresql":
+        return {
+            "connector": "postgresql",
+            "properties": {
+                "connection-url": f"jdbc:postgresql://localhost:{source_config['default_port']}/{catalog_info['database'] or 'shared_db'}",
+                "connection-user": db_config["database_user"],
+                "connection-password": "${ENV:DB_USER_PASSWORD}",
+                "postgresql.connection-property.search_path": catalog_info["schema"]
+            }
+        }
+    
+    elif source_type == "mysql":
+        return {
+            "connector": "mysql", 
+            "properties": {
+                "connection-url": f"jdbc:mysql://localhost:{source_config['default_port']}/{catalog_info['database'] or 'shared_db'}",
+                "connection-user": db_config["database_user"],
+                "connection-password": "${ENV:DB_USER_PASSWORD}",
+                "mysql.default-schema": catalog_info["schema"]
+            }
+        }
+    
+    elif source_type == "bigquery":
+        return {
+            "connector": "bigquery",
+            "properties": {
+                "bigquery.project-id": "${ENV:GCP_PROJECT}",
+                "bigquery.default-dataset": catalog_info["schema"],
+                "bigquery.credentials-key": "${ENV:GOOGLE_APPLICATION_CREDENTIALS}"
+            }
+        }
+        
+    elif source_type == "s3":
+        return {
+            "connector": "hive",
+            "properties": {
+                "hive.metastore": "glue",
+                "hive.s3.aws-access-key": "${ENV:AWS_ACCESS_KEY_ID}",
+                "hive.s3.aws-secret-key": "${ENV:AWS_SECRET_ACCESS_KEY}",
+                "hive.s3.path-style-access": "true",
+                "hive.s3.staging-directory": f"s3://shared-staging/{catalog_info['s3_prefix']}"
+            }
+        }
+    
+    elif source_type == "synapse":
+        return {
+            "connector": "sqlserver",
+            "properties": {
+                "connection-url": f"jdbc:sqlserver://localhost:{source_config['default_port']};database={catalog_info['database'] or 'shared_db'}",
+                "connection-user": db_config["database_user"],
+                "connection-password": "${ENV:DB_USER_PASSWORD}",
+                "sqlserver.default-schema": catalog_info["schema"]
+            }
+        }
+    
+    return None
+
+def _get_user_enabled_sources():
+    """Get list of data sources that user has enabled"""
+    enabled_sources = []
+    
+    # Check for connection profiles
+    for profile_file in PROFILES_DIR.glob("*.json"):
+        source_id = profile_file.stem
+        if source_id in DATA_SOURCE_TYPES:
+            enabled_sources.append(source_id)
+    
+    return enabled_sources
+
+def create_user_database_schema(source_id, user_profile=None):
+    """Create user-specific database schema for isolation"""
+    if source_id not in DATA_SOURCE_TYPES:
+        return {
+            "success": False,
+            "error": f"Unknown data source: {source_id}"
+        }
+    
+    try:
+        from config import get_user_database_config
+        db_config = get_user_database_config(user_profile)
+    except ImportError:
+        return {
+            "success": False,
+            "error": "Configuration module not available"
+        }
+    
+    source_config = DATA_SOURCE_TYPES[source_id]
+    source_type = source_config["type"]
+    
+    # Generate SQL statements for schema creation
+    schema_sql = []
+    
+    if source_type in ["postgresql", "mysql"]:
+        schema_sql.extend([
+            f"CREATE SCHEMA IF NOT EXISTS {db_config['default_schema']};",
+            f"CREATE USER IF NOT EXISTS {db_config['database_user']} WITH PASSWORD 'user_password_123';",
+            f"GRANT ALL PRIVILEGES ON SCHEMA {db_config['default_schema']} TO {db_config['database_user']};",
+            f"SET search_path TO {db_config['default_schema']}, public;"
+        ])
+        
+    elif source_type == "bigquery":
+        # BigQuery dataset creation would be handled via API
+        schema_sql.append(f"-- BigQuery dataset: {db_config['default_schema']} (created via API)")
+        
+    elif source_type == "synapse":
+        schema_sql.extend([
+            f"CREATE SCHEMA [{db_config['default_schema']}];",
+            f"CREATE USER [{db_config['database_user']}] WITH PASSWORD = 'UserPassword123!';",
+            f"ALTER ROLE db_owner ADD MEMBER [{db_config['database_user']}];"
+        ])
+    
+    return {
+        "success": True,
+        "source_id": source_id,
+        "user": db_config["schema_prefix"], 
+        "schema_name": db_config["default_schema"],
+        "database_user": db_config["database_user"],
+        "sql_statements": schema_sql,
+        "next_steps": [
+            "Execute SQL statements on target database",
+            "Update connection credentials",
+            "Test catalog connectivity in Starburst"
+        ]
+    }
+
+def get_user_data_summary(user_profile=None):
+    """Get summary of user's data sources and catalogs"""
+    try:
+        from config import get_user_database_config
+        db_config = get_user_database_config(user_profile)
+        
+        # Get user's enabled sources
+        enabled_sources = _get_user_enabled_sources()
+        
+        # Get catalog information
+        user_catalogs = get_user_catalogs(user_profile, enabled_sources)
+        
+        summary = {
+            "user_info": {
+                "schema_prefix": db_config["schema_prefix"],
+                "database_user": db_config["database_user"],
+                "team": db_config["team_prefix"]
+            },
+            "enabled_sources": {
+                "count": len(enabled_sources),
+                "sources": enabled_sources
+            },
+            "catalogs": {
+                "count": user_catalogs.get("catalog_count", 0),
+                "names": list(user_catalogs.get("catalogs", {}).keys())
+            },
+            "isolation_status": "active" if enabled_sources else "no_sources_enabled"
+        }
+        
+        return {
+            "success": True,
+            "summary": summary
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to generate user data summary: {str(e)}"
+        }
