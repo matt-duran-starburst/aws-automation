@@ -241,6 +241,87 @@ def get_azure_subscription():
     return os.environ.get('AZURE_SUBSCRIPTION_ID', '')
 
 # ============================================================================
+# USER DATABASE ISOLATION
+# ============================================================================
+
+def get_user_database_config(user_profile=None):
+    """Generate user-specific database configuration for schema isolation"""
+    if user_profile is None:
+        config = get_config()
+        user_profile = {
+            "name": config.get_user_name(),
+            "email": config.get_user_email(),
+            "team": config.get_user_team()
+        }
+    
+    if not user_profile.get("name"):
+        raise ValueError("User name is required for database configuration. Run 'platform_cli.py setup' first.")
+    
+    # Create safe username for database objects
+    name = user_profile.get("name", "")
+    if not name:
+        raise ValueError("User name is required for database configuration")
+    
+    username = str(name).lower().replace(" ", "_").replace(".", "_")
+    username = "".join(c for c in username if c.isalnum() or c == "_")[:20]  # Limit length
+    
+    # Team-based prefix for better organization
+    team = user_profile.get("team", "general")
+    if team:
+        team_prefix = str(team).lower().replace(" ", "_")[:10]
+    else:
+        team_prefix = "general"
+    
+    return {
+        "username": username,
+        "team_prefix": team_prefix,
+        "schema_prefix": f"{team_prefix}_{username}",
+        "catalog_prefix": f"{username}_",
+        "s3_prefix": f"users/{team}/{username}/",
+        "database_user": f"user_{username}",
+        "default_schema": f"{username}_workspace",
+        "default_database": f"{username}_db"
+    }
+
+def get_user_catalog_names(data_sources=None, user_profile=None):
+    """Generate user-specific catalog names for Starburst"""
+    db_config = get_user_database_config(user_profile)
+    
+    if data_sources is None:
+        data_sources = ["postgres", "mysql", "bigquery", "s3"]
+    
+    catalogs = {}
+    for source in data_sources:
+        catalog_name = f"{db_config['catalog_prefix']}{source}"
+        catalogs[source] = {
+            "catalog_name": catalog_name,
+            "schema": db_config["default_schema"],
+            "database": db_config["default_database"] if source in ["postgres", "mysql"] else None,
+            "s3_prefix": db_config["s3_prefix"] if source == "s3" else None
+        }
+    
+    return catalogs
+
+def validate_user_database_config():
+    """Validate user database configuration requirements"""
+    try:
+        config = get_config()
+        
+        if not config.is_setup_complete():
+            return False, ["User setup not complete. Run 'platform_cli.py setup' first."]
+        
+        if not config.get_user_name():
+            return False, ["User name is required for database isolation."]
+        
+        # Test generating config
+        db_config = get_user_database_config()
+        
+        return True, [f"Database config ready for user: {db_config['schema_prefix']}"]
+        
+    except Exception as e:
+        return False, [f"Database config validation failed: {str(e)}"]
+
+# ============================================================================
 # USAGE TRACKING
 # ============================================================================
 
