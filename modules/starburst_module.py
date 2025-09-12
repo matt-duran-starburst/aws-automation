@@ -216,7 +216,7 @@ def check_starburst_resource_requirements(preset: str) -> Dict[str, Any]:
     return result
 
 
-def generate_values_file(preset: str, connected_sources: List[str] = None, cluster_name: str = "default") -> Dict[str, Any]:
+def generate_values_file(preset: str, connected_sources: List[str] = None, cluster_name: str = "default", user_profile: Dict[str, Any] = None) -> Dict[str, Any]:
     """Generate Helm values file for Starburst deployment"""
     if preset not in STARBURST_PRESETS:
         return {
@@ -287,34 +287,56 @@ def generate_values_file(preset: str, connected_sources: List[str] = None, clust
                 "connector": "tpcds"
             }
     
-    # Add connected data sources as catalogs
-    for source in connected_sources:
-        if source.startswith("aws-postgres"):
-            values_template["catalogs"]["postgres_shared"] = {
-                "connector": "postgresql",
-                "properties": {
-                    "connection-url": "jdbc:postgresql://localhost:5433/shared_db",
-                    "connection-user": "starburst",
-                    "connection-password": "shared_password"
+    # Add user-specific data source catalogs
+    try:
+        from modules.shared_data_module import get_user_catalogs
+        
+        # Get user-specific catalogs for connected data sources
+        user_catalogs_result = get_user_catalogs(user_profile, connected_sources)
+        
+        if user_catalogs_result["success"]:
+            # Add user-specific catalogs
+            user_catalogs = user_catalogs_result["catalogs"]
+            values_template["catalogs"].update(user_catalogs)
+            
+            click.echo(f"   • User-specific catalogs: {len(user_catalogs)} configured")
+            if user_catalogs:
+                click.echo(f"     Catalog names: {', '.join(user_catalogs.keys())}")
+        else:
+            click.echo(f"   ⚠️  Could not generate user-specific catalogs: {user_catalogs_result.get('error', 'Unknown error')}")
+            # Fall back to basic shared catalogs
+            for source in connected_sources:
+                if source.startswith("aws-postgres"):
+                    values_template["catalogs"]["postgres_shared"] = {
+                        "connector": "postgresql",
+                        "properties": {
+                            "connection-url": "jdbc:postgresql://localhost:5433/shared_db",
+                            "connection-user": "starburst",
+                            "connection-password": "shared_password"
+                        }
+                    }
+                elif source.startswith("gcp-bigquery"):
+                    values_template["catalogs"]["bigquery_shared"] = {
+                        "connector": "bigquery",
+                        "properties": {
+                            "project-id": "starburst-shared-dev",
+                            "parent-project-id": "starburst-shared-dev"
+                        }
+                    }
+            
+    except ImportError:
+        click.echo("   ⚠️  Shared data module not available, using basic catalog configuration")
+        # Basic fallback catalogs
+        for source in connected_sources:
+            if "postgres" in source:
+                values_template["catalogs"]["postgres_shared"] = {
+                    "connector": "postgresql",
+                    "properties": {
+                        "connection-url": "jdbc:postgresql://localhost:5433/shared_db",
+                        "connection-user": "starburst",
+                        "connection-password": "shared_password"
+                    }
                 }
-            }
-        elif source.startswith("aws-mysql"):
-            values_template["catalogs"]["mysql_shared"] = {
-                "connector": "mysql",
-                "properties": {
-                    "connection-url": "jdbc:mysql://localhost:3306/shared_db",
-                    "connection-user": "starburst", 
-                    "connection-password": "shared_password"
-                }
-            }
-        elif source.startswith("gcp-bigquery"):
-            values_template["catalogs"]["bigquery_shared"] = {
-                "connector": "bigquery",
-                "properties": {
-                    "project-id": "starburst-shared-dev",
-                    "parent-project-id": "starburst-shared-dev"
-                }
-            }
     
     # Save values file
     values_file = VALUES_DIR / f"starburst-{cluster_name}-{preset}.yaml"
@@ -336,7 +358,7 @@ def generate_values_file(preset: str, connected_sources: List[str] = None, clust
             "error": f"Failed to save values file: {str(e)}"
         }
 
-def prepare_starburst_deployment(cluster_name: str, preset: str = "development", connected_sources: List[str] = None) -> Dict[str, Any]:
+def prepare_starburst_deployment(cluster_name: str, preset: str = "development", connected_sources: List[str] = None, user_profile: Dict[str, Any] = None) -> Dict[str, Any]:
     """Prepare cluster for Starburst deployment (namespace, values file)"""
     if not check_kubectl_available():
         return {"success": False, "error": "kubectl not available or cannot connect to cluster"}
@@ -362,8 +384,21 @@ def prepare_starburst_deployment(cluster_name: str, preset: str = "development",
     if not namespace_result["success"]:
         click.echo(f"⚠️  Warning: Could not create namespace: {namespace_result.get('error', 'Unknown error')}")
     
-    # Generate values file
-    values_result = generate_values_file(preset, connected_sources, cluster_name)
+    # Get user profile if not provided
+    if user_profile is None:
+        try:
+            from config import get_config
+            config = get_config()
+            user_profile = {
+                "name": config.get_user_name(),
+                "email": config.get_user_email(), 
+                "team": config.get_user_team()
+            }
+        except ImportError:
+            user_profile = {}
+    
+    # Generate values file with user-specific catalogs
+    values_result = generate_values_file(preset, connected_sources, cluster_name, user_profile)
     if not values_result["success"]:
         return values_result
     
