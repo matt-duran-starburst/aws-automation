@@ -891,3 +891,282 @@ def backup_infrastructure_state() -> Dict[str, Any]:
         "backup_dir": str(backup_dir),
         "backups": backups
     }
+
+# ============================================================================
+# USER DATABASE PROVISIONING
+# ============================================================================
+
+def provision_user_database_access(user_profile=None, data_sources=None):
+    """Provision user-specific database schemas and access across shared instances"""
+    if data_sources is None:
+        data_sources = ["aws-postgres", "gcp-postgres", "azure-sqlserver"]
+    
+    try:
+        from config import get_user_database_config, validate_user_database_config
+        from modules.shared_data_module import create_user_database_schema
+        
+        # Validate user configuration
+        valid, messages = validate_user_database_config()
+        if not valid:
+            return {
+                "success": False,
+                "error": f"User configuration invalid: {'; '.join(messages)}"
+            }
+            
+        db_config = get_user_database_config(user_profile)
+        
+    except ImportError as e:
+        return {
+            "success": False,
+            "error": f"Required modules not available: {str(e)}"
+        }
+    
+    click.echo(f"🔐 Provisioning database access for user: {db_config['schema_prefix']}")
+    
+    provisioning_results = {}
+    sql_scripts = {}
+    
+    for source_id in data_sources:
+        click.echo(f"   • Processing {source_id}...")
+        
+        # Generate schema creation commands
+        schema_result = create_user_database_schema(source_id, user_profile)
+        
+        if schema_result["success"]:
+            provisioning_results[source_id] = {
+                "success": True,
+                "schema_name": schema_result["schema_name"],
+                "database_user": schema_result["database_user"],
+                "sql_statements": schema_result["sql_statements"]
+            }
+            
+            sql_scripts[source_id] = schema_result["sql_statements"]
+            
+        else:
+            provisioning_results[source_id] = {
+                "success": False,
+                "error": schema_result.get("error", "Unknown error")
+            }
+    
+    # Generate consolidated SQL script for manual execution
+    script_file = _generate_user_provisioning_script(db_config, sql_scripts)
+    
+    success_count = len([r for r in provisioning_results.values() if r["success"]])
+    total_count = len(provisioning_results)
+    
+    click.echo(f"✅ User database provisioning prepared: {success_count}/{total_count} sources")
+    
+    if script_file:
+        click.echo(f"\n📋 Next Steps:")
+        click.echo(f"   1. Review generated SQL script: {script_file}")
+        click.echo(f"   2. Execute SQL statements on each target database")
+        click.echo(f"   3. Test catalog connectivity in Starburst")
+        click.echo(f"   4. Update environment variables with user credentials")
+    
+    return {
+        "success": success_count == total_count,
+        "user": db_config["schema_prefix"],
+        "database_user": db_config["database_user"],
+        "provisioning_results": provisioning_results,
+        "sql_script_file": script_file,
+        "sources_processed": total_count,
+        "sources_successful": success_count
+    }
+
+def _generate_user_provisioning_script(db_config, sql_scripts):
+    """Generate consolidated SQL script for user database provisioning"""
+    script_content = []
+    
+    script_content.extend([
+        f"-- User Database Provisioning Script",
+        f"-- Generated: {datetime.now().isoformat()}",
+        f"-- User: {db_config['schema_prefix']}",
+        f"-- Database User: {db_config['database_user']}",
+        f"",
+        f"-- IMPORTANT: Execute these statements on the appropriate shared databases",
+        f"-- Make sure to update connection credentials after running these commands",
+        f""
+    ])
+    
+    for source_id, sql_statements in sql_scripts.items():
+        script_content.extend([
+            f"",
+            f"-- ===== {source_id.upper()} =====",
+            f""
+        ])
+        
+        for statement in sql_statements:
+            script_content.append(f"{statement}")
+    
+    script_content.extend([
+        f"",
+        f"-- Environment Variables to Set:",
+        f"-- export DB_USER_PASSWORD='user_password_123'",
+        f"-- export GCP_PROJECT='your-gcp-project'",
+        f"-- export GOOGLE_APPLICATION_CREDENTIALS='/path/to/service-account.json'",
+        f""
+    ])
+    
+    # Save script file
+    script_file = OUTPUTS_DIR / f"user_provisioning_{db_config['username']}.sql"
+    
+    try:
+        with open(script_file, 'w') as f:
+            f.write('\n'.join(script_content))
+        return str(script_file)
+    except Exception as e:
+        click.echo(f"⚠️  Could not save SQL script: {str(e)}")
+        return None
+
+def get_user_database_status(user_profile=None):
+    """Get status of user's database schemas and access across clouds"""
+    try:
+        from config import get_user_database_config
+        from modules.shared_data_module import get_user_data_summary
+        
+        db_config = get_user_database_config(user_profile)
+        user_summary = get_user_data_summary(user_profile)
+        
+        if not user_summary["success"]:
+            return user_summary
+            
+        summary = user_summary["summary"]
+        
+        # Get infrastructure status to check if shared databases are running
+        infra_status = get_infrastructure_status()
+        
+        database_status = {}
+        
+        for stack_name, stack_info in infra_status.get("stacks", {}).items():
+            if stack_name == "shared-databases" and stack_info.get("exists"):
+                outputs = stack_info.get("outputs", {})
+                
+                # Check AWS databases
+                if "aws_endpoints" in outputs:
+                    database_status["aws"] = {
+                        "infrastructure_ready": True,
+                        "endpoints": outputs["aws_endpoints"],
+                        "user_schema_status": "needs_provisioning"  # Would need to check actual DB
+                    }
+                
+                # Check GCP databases  
+                if "gcp_endpoints" in outputs:
+                    database_status["gcp"] = {
+                        "infrastructure_ready": True,
+                        "endpoints": outputs["gcp_endpoints"],
+                        "user_schema_status": "needs_provisioning"
+                    }
+                
+                # Check Azure databases
+                if "azure_endpoints" in outputs:
+                    database_status["azure"] = {
+                        "infrastructure_ready": True,
+                        "endpoints": outputs["azure_endpoints"], 
+                        "user_schema_status": "needs_provisioning"
+                    }
+        
+        return {
+            "success": True,
+            "user": db_config["schema_prefix"],
+            "user_info": summary["user_info"],
+            "enabled_sources": summary["enabled_sources"],
+            "catalogs": summary["catalogs"],
+            "database_status": database_status,
+            "isolation_status": summary["isolation_status"]
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to get user database status: {str(e)}"
+        }
+
+def cleanup_user_database_access(user_profile=None, data_sources=None):
+    """Remove user-specific database schemas and access (for cleanup/reset)"""
+    if data_sources is None:
+        data_sources = ["aws-postgres", "gcp-postgres", "azure-sqlserver"]
+    
+    try:
+        from config import get_user_database_config
+        db_config = get_user_database_config(user_profile)
+    except ImportError:
+        return {
+            "success": False,
+            "error": "Configuration module not available"
+        }
+    
+    click.echo(f"🧹 Cleaning up database access for user: {db_config['schema_prefix']}")
+    
+    cleanup_results = {}
+    sql_scripts = {}
+    
+    for source_id in data_sources:
+        # Generate cleanup SQL statements
+        cleanup_sql = []
+        
+        if "postgres" in source_id or "mysql" in source_id:
+            cleanup_sql.extend([
+                f"DROP SCHEMA IF EXISTS {db_config['default_schema']} CASCADE;",
+                f"DROP USER IF EXISTS {db_config['database_user']};"
+            ])
+        elif "sqlserver" in source_id or "synapse" in source_id:
+            cleanup_sql.extend([
+                f"DROP SCHEMA [{db_config['default_schema']}];",
+                f"DROP USER [{db_config['database_user']}];"
+            ])
+        elif "bigquery" in source_id:
+            cleanup_sql.append(f"-- BigQuery dataset: {db_config['default_schema']} (delete via API or Console)")
+        
+        cleanup_results[source_id] = {
+            "success": True,
+            "sql_statements": cleanup_sql
+        }
+        
+        sql_scripts[source_id] = cleanup_sql
+    
+    # Generate cleanup script
+    script_file = _generate_user_cleanup_script(db_config, sql_scripts)
+    
+    click.echo(f"✅ User database cleanup script generated")
+    if script_file:
+        click.echo(f"   • Cleanup script: {script_file}")
+        click.echo(f"   • Execute SQL statements to remove user schemas and access")
+    
+    return {
+        "success": True,
+        "user": db_config["schema_prefix"],
+        "cleanup_results": cleanup_results,
+        "sql_script_file": script_file
+    }
+
+def _generate_user_cleanup_script(db_config, sql_scripts):
+    """Generate consolidated SQL script for user database cleanup"""
+    script_content = [
+        f"-- User Database Cleanup Script",
+        f"-- Generated: {datetime.now().isoformat()}", 
+        f"-- User: {db_config['schema_prefix']}",
+        f"",
+        f"-- WARNING: This will permanently delete user schemas and data",
+        f"-- Make sure to backup any important data before running",
+        f""
+    ]
+    
+    for source_id, sql_statements in sql_scripts.items():
+        script_content.extend([
+            f"",
+            f"-- ===== {source_id.upper()} CLEANUP =====",
+            f""
+        ])
+        
+        for statement in sql_statements:
+            script_content.append(f"{statement}")
+    
+    # Save cleanup script
+    script_file = OUTPUTS_DIR / f"user_cleanup_{db_config['username']}.sql"
+    
+    try:
+        with open(script_file, 'w') as f:
+            f.write('\n'.join(script_content))
+        return str(script_file)
+    except Exception:
+        return None
